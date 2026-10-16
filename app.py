@@ -1,6 +1,5 @@
 import io
 import math
-import os
 import re
 import struct
 import wave
@@ -8,7 +7,7 @@ import streamlit as st
 from PIL import Image, ImageDraw
 
 # =============================================================================
-# CONFIGURACIÓN DE PÁGINA Y ESTILO VISUAL
+# CONFIGURACIÓN DE PÁGINA Y CSS DE ALTO CONTRASTE (ANTI-MODO OSCURO ROTO)
 # =============================================================================
 st.set_page_config(
     page_title="NES Shooter Studio",
@@ -19,23 +18,90 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .stApp { background-color: #0e0e18; color: #e8e8f0; }
-    section[data-testid="stSidebar"] { background-color: #151525; border-right: 1px solid #2c2c44; }
-    h1, h2, h3 { font-family: 'Courier New', Courier, monospace !important; color: #00e5ff !important; }
-    .retro-card {
-        background: #181828; border: 1px solid #ff6d00; border-radius: 8px;
-        padding: 14px; margin-bottom: 12px;
+    /* Forzar tema claro de alto contraste legible en cualquier navegador */
+    .stApp {
+        background-color: #f1f5f9 !important;
+        color: #0f172a !important;
     }
-    .code-box {
-        background: #07070c; border: 1px solid #00e5ff; border-radius: 6px;
-        padding: 12px; font-family: 'Courier New', monospace; color: #00e676;
-        white-space: pre; overflow-x: auto; font-size: 13px; line-height: 1.4;
+    section[data-testid="stSidebar"] {
+        background-color: #ffffff !important;
+        border-right: 2px solid #cbd5e1 !important;
+    }
+    section[data-testid="stSidebar"] * {
+        color: #0f172a !important;
+    }
+    h1, h2, h3, h4, p, label, span, div {
+        color: #0f172a;
+    }
+    /* Tarjetas limpias */
+    .studio-card {
+        background-color: #ffffff !important;
+        border: 1px solid #cbd5e1 !important;
+        border-left: 5px solid #2563eb !important;
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 16px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    /* Pestañas bien legibles */
+    button[data-baseweb="tab"] {
+        background-color: #e2e8f0 !important;
+        color: #1e293b !important;
+        font-weight: 700 !important;
+        border-radius: 6px 6px 0 0 !important;
+        margin-right: 4px !important;
+        padding: 10px 18px !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        background-color: #2563eb !important;
+        color: #ffffff !important;
+    }
+    /* Inputs, Selectboxes y Textareas siempre con fondo blanco y letra negra */
+    input, textarea, select, [data-baseweb="select"] > div {
+        background-color: #ffffff !important;
+        color: #0f172a !important;
+        border: 1px solid #94a3b8 !important;
+    }
+    /* Botones de acción */
+    .stButton > button, .stDownloadButton > button {
+        background-color: #2563eb !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        border: none !important;
+        border-radius: 6px !important;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        background-color: #1d4ed8 !important;
+        color: #ffffff !important;
+    }
+    /* Visor de código y desensamblador */
+    .asm-viewer {
+        background-color: #0f172a !important;
+        color: #38bdf8 !important;
+        font-family: 'Consolas', 'Courier New', monospace !important;
+        font-size: 13.5px !important;
+        padding: 14px !important;
+        border-radius: 6px !important;
+        white-space: pre !important;
+        overflow-x: auto !important;
+        line-height: 1.45 !important;
+    }
+    .tv-preview {
+        background-color: #090d16 !important;
+        color: #f8fafc !important;
+        border: 4px solid #334155 !important;
+        border-radius: 8px !important;
+        padding: 16px !important;
+        font-family: 'Consolas', 'Courier New', monospace !important;
+        font-size: 15px !important;
+        white-space: pre !important;
+        line-height: 1.4 !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# TABLAS DE HARDWARE NES (PALETA 2C02, MAPPERS, OPCODES 6502 Y NOTAS 2A03)
+# CONSTANTES DE HARDWARE NES (PALETA 2C02, MAPPERS, OPCODES 6502 Y NOTAS 2A03)
 # =============================================================================
 NES_MASTER_PALETTE = [
     (84, 84, 84), (0, 30, 116), (8, 16, 144), (48, 0, 136),
@@ -57,13 +123,13 @@ NES_MASTER_PALETTE = [
 ]
 
 MAPPER_NAMES = {
-    0: "NROM (Sin Mapper / 16-32KB PRG)",
+    0: "NROM (Estándar 16-32KB PRG)",
     1: "MMC1 (SxROM - Nintendo)",
-    2: "UxROM (PRG Switch)",
-    3: "CNROM (CHR Switch)",
-    4: "MMC3 (TxROM - IRQ Scanline)",
-    7: "AxROM (Single-Screen)",
-    9: "MMC2 (PxROM - Punch-Out!!)",
+    2: "UxROM (Cambio de bancos PRG)",
+    3: "CNROM (Cambio de bancos CHR)",
+    4: "MMC3 (TxROM - Contador IRQ)",
+    7: "AxROM",
+    9: "MMC2 (PxROM)",
     66: "GxROM",
 }
 
@@ -109,15 +175,16 @@ OPCODES_6502 = {
 }
 
 NOTE_NAMES = [
-    "---", "C-3", "C#3", "D-3", "D#3", "E-3", "F-3", "F#3", "G-3", "G#3", "A-3", "A#3", "B-3",
-    "C-4", "C#4", "D-4", "D#4", "E-4", "F-4", "F#4", "G-4", "G#4", "A-4", "A#4", "B-4",
-    "C-5", "C#5", "D-5", "D#5", "E-5", "F-5", "F#5", "G-5", "G#5", "A-5", "A#5", "B-5"
+    "Silencio (---)", "E-3", "G-3", "A-3", "B-3", "C-4", "D-4", "D#4", "E-4",
+    "F#4", "G-4", "G#4", "A-4", "B-4", "C-5", "C#5", "D-5", "E-5",
+    "F-5", "F#5", "G-5", "G#5", "A-5", "B-5"
 ]
-NOTE_FREQS = [0.0] + [130.81 * (2 ** (i / 12.0)) for i in range(36)]
 NOTE_TO_IDX = {n: i for i, n in enumerate(NOTE_NAMES)}
-
-DRUM_NAMES = ["---", "DUM (Kick)", "CLAP (Snare)", "TS (Hi-Hat)"]
+DRUM_NAMES = ["Silencio (---)", "Bombo (DUM)", "Caja (CLAP)", "Platillo (TS)"]
 DRUM_TO_IDX = {n: i for i, n in enumerate(DRUM_NAMES)}
+
+DEFAULT_NOTE_LO = [0x00,0xA6,0x3A,0xFB,0xC4,0xAB,0x7C,0x67,0x52,0x2D,0x1C,0xFD,0xE1,0xD5,0xBD,0xB3,0xA9,0x96,0x8E,0x7E,0x70,0x6A,0x5E,0x54]
+DEFAULT_NOTE_HI = [0x00,0x02,0x02,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
 
 
 def nes_rgb(idx):
@@ -128,109 +195,51 @@ def rgb_hex(rgb):
     return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
 
 
-def build_default_chr():
-    chr_data = bytearray(8192)
-    def put_hex(offset, hex_str):
-        raw = bytes.fromhex(hex_str.replace(" ", ""))
-        chr_data[offset:offset + len(raw)] = raw
-
-    put_hex(0x0010,
-        "DB999999DB9999996666424266664242"
-        "00000000810000000000000000000000"
-        "18181818000018181818181800001818"
-        "FFFF00000000FFFFFFFFAA55AA55FFFF"
-        "FF80BDADADBD8080FFFE80B5B5808080"
-        "FF00BDADADBD0000FFFF00B5B5000000"
-        "FF03BDADADBD0303FF7F01B5B5010101"
-        "8080BD8080FFFF008080BD808000FFFF"
-        "0000BD0000FFFF000000BD000000FFFF"
-        "0303BD0303FFFF010101BD010101FFFF"
-        "D5D5FFFFD5D5FFFF8080808080808080"
-        "B6B6FFFFB6B6FFFF0000000000000000"
-        "ABABFFFFABABFFFF0303030303030303"
-        "FF000024000000FF00FF000000000000"
-    )
-    put_hex(0x1010,
-        "01030307070F3F7E000001010303061C7CEFCF1F9FCF18001830706000000000"
-        "1F7FF89EBF7B3C1800001F61430700001F0F0700000000000000000000000000"
-        "0018181818180000001818181818000000001824241800000000001818000000"
-        "0000000000000000000000000000000000000000000000FF00000000000000FF"
-        "071F3F7FF3FF7F3F00071C300F1F07001F0F3737130300000700080800000000"
-        "0103070F1F3F7F7F00000103060C19337FDFCF87030100003F00000000000000"
-        "18183C7EFFDB9918001818243C180000"
-        "183C3C7E5A7E5A7E0018002400240024"
-        "007E427E00000000003C3C3C00000000"
-    )
-    put_hex(0x1800,
-        "01030307070F1F3F0000010D0D050D157FFFEF1F9FCF0D0199B5AD32320C0301"
-        "03070727272F3F7F03030323272101037F7F7F7F3F0F0606819D819D030E0606"
-        "01030327272F1F7F01020220262E19057F7F7F3B1B0F03012561612424092020"
-        "00242424242424000000242424240000"
-        "00183C7E420000000000183C7E420000"
-        "0018187E7E1818000000183C3C180000"
-        "142A5D3F7F3F5F2F081C3E7F7F3F1E0C"
-        "92492408814210884020080001020800"
-    )
-    return chr_data
-
-
 # =============================================================================
-# INICIALIZACIÓN DEL ESTADO GLOBAL EN MEMORIA
+# INICIALIZACIÓN DEL ESTADO (VACÍO HASTA QUE EL USUARIO SUBA UN ARCHIVO)
 # =============================================================================
 def init_state():
     if "initialized" in st.session_state:
         return
     st.session_state.initialized = True
-    st.session_state.rom_name = "shooter.nes"
-    st.session_state.asm_name = "shooter.s"
+    st.session_state.has_nes = False
+    st.session_state.has_asm = False
+    st.session_state.nes_name = ""
+    st.session_state.asm_name = ""
     st.session_state.asm_text = ""
 
-    st.session_state.header = bytearray([0x4E, 0x45, 0x53, 0x1A, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-    st.session_state.prg_data = bytearray(16384)
-    st.session_state.chr_data = build_default_chr()
-    st.session_state.nametable = bytearray([((i % 14) + 1) for i in range(960)])
-
+    st.session_state.header = bytearray()
+    st.session_state.prg_data = bytearray()
+    st.session_state.chr_data = bytearray()
     st.session_state.palette = [
-        0x0F, 0x00, 0x0C, 0x18, 0x0F, 0x01, 0x02, 0x12,
-        0x0F, 0x16, 0x27, 0x38, 0x0F, 0x30, 0x00, 0x10,
-        0x0F, 0x2C, 0x38, 0x11, 0x0F, 0x0C, 0x24, 0x38,
-        0x0F, 0x2A, 0x38, 0x30, 0x0F, 0x30, 0x16, 0x27
+        0x0F, 0x00, 0x10, 0x30, 0x0F, 0x01, 0x11, 0x21,
+        0x0F, 0x16, 0x27, 0x38, 0x0F, 0x09, 0x19, 0x29,
+        0x0F, 0x2C, 0x38, 0x11, 0x0F, 0x16, 0x27, 0x30,
+        0x0F, 0x2A, 0x38, 0x30, 0x0F, 0x14, 0x24, 0x38
     ]
 
     st.session_state.asm_strings = []
     st.session_state.asm_tables = {}
-
-    st.session_state.tracker = [
-        {"Paso": f"{i:02d}",
-         "Pulso_1": NOTE_NAMES[17 if i % 4 == 0 else (20 if i % 4 == 2 else 0)],
-         "Pulso_2": NOTE_NAMES[12 if i % 2 == 0 else 15],
-         "Triangulo": NOTE_NAMES[5 if i % 2 == 0 else 17],
-         "Ruido": DRUM_NAMES[1 if i % 4 == 0 else (2 if i % 4 == 2 else 3)]}
-        for i in range(32)
-    ]
-
-    for f in os.listdir("."):
-        if f.lower().endswith(".nes"):
-            with open(f, "rb") as fp:
-                load_nes_rom(bytearray(fp.read()), f)
-            break
-    for f in os.listdir("."):
-        if f.lower().endswith((".s", ".asm")):
-            with open(f, "r", encoding="utf-8", errors="ignore") as fp:
-                load_asm_source(fp.read(), f)
-            break
+    st.session_state.songs = {}
+    st.session_state.note_lo = list(DEFAULT_NOTE_LO)
+    st.session_state.note_hi = list(DEFAULT_NOTE_HI)
 
 
-def load_nes_rom(data: bytearray, filename: str):
+# =============================================================================
+# ANALIZADORES AUTOMÁTICOS AL SUBIR ARCHIVO .NES O .S
+# =============================================================================
+def analyze_nes_file(data: bytearray, filename: str):
     if len(data) < 16 or data[:4] != b"NES\x1a":
-        st.error("El archivo no contiene una firma iNES ('NES\\x1A') válida.")
+        st.error("❌ El archivo seleccionado no tiene una cabecera iNES válida ('NES\\x1A').")
         return
-    st.session_state.rom_name = filename
+
+    st.session_state.has_nes = True
+    st.session_state.nes_name = filename
     st.session_state.header = data[:16]
+
     prg_banks = data[4]
     chr_banks = data[5]
     has_trainer = bool(data[6] & 0x04)
-
     offset = 16 + (512 if has_trainer else 0)
     prg_size = prg_banks * 16384
     chr_size = chr_banks * 8192
@@ -241,27 +250,82 @@ def load_nes_rom(data: bytearray, filename: str):
     else:
         st.session_state.chr_data = bytearray(data[offset:offset + 8192]) if len(data) >= offset + 8192 else bytearray(8192)
 
-
-def export_nes_rom() -> bytes:
-    hdr = bytearray(st.session_state.header)
+    # Buscar paletas en PRG-ROM (bloques de 16 o 32 bytes que inicien con $0F y valores <= $3F)
     prg = st.session_state.prg_data
-    chr_d = st.session_state.chr_data
-    hdr[4] = max(1, len(prg) // 16384)
-    hdr[5] = len(chr_d) // 8192 if int(st.session_state.header[5]) > 0 else 0
-    if hdr[5] > 0:
-        return bytes(hdr + prg + chr_d)
-    return bytes(hdr + prg)
+    for i in range(len(prg) - 32):
+        if prg[i] == 0x0F and prg[i + 4] == 0x0F and prg[i + 8] == 0x0F and prg[i + 12] == 0x0F:
+            cand = list(prg[i:i + 32])
+            if all(b <= 0x3F for b in cand) and len(set(cand)) >= 6:
+                st.session_state.palette = cand
+                break
+
+    # Detectar canciones dentro del binario .nes si aún no hay canciones cargadas desde .s
+    if not st.session_state.songs:
+        detect_songs_in_rom(prg)
 
 
-def load_asm_source(text: str, filename: str):
+def detect_songs_in_rom(prg: bytearray):
+    songs = {}
+    # 1. Buscar firma de la tabla de notas de SHOOTER o secuencias musicales en PRG-ROM
+    sig = bytes([0x00, 0xA6, 0x3A, 0xFB, 0xC4, 0xAB])
+    pos = prg.find(sig)
+    if pos != -1 and pos + 800 <= len(prg):
+        st.session_state.note_lo = list(prg[pos:pos + 24])
+        st.session_state.note_hi = list(prg[pos + 24:pos + 48])
+        base = pos + 48 + 36  # Saltar song_order (36 bytes)
+        if base + 800 <= len(prg):
+            songs["Tema Principal (Extraído de ROM)"] = {
+                "tempo": 6,
+                "mel": list(prg[base:base + 64]),
+                "harm": list(prg[base + 256:base + 320]),
+                "bass": list(prg[base + 512:base + 576]),
+                "drum": list(prg[base + 768:base + 784]),
+                "rom_offset": base,
+            }
+            s_base = base + 784
+            if s_base + 112 <= len(prg):
+                songs["Tema de Historia / Suspenso (ROM)"] = {
+                    "tempo": 12,
+                    "mel": list(prg[s_base:s_base + 32]),
+                    "harm": list(prg[s_base + 32:s_base + 64]),
+                    "bass": list(prg[s_base + 64:s_base + 96]),
+                    "drum": list(prg[s_base + 96:s_base + 112]),
+                    "rom_offset": s_base,
+                }
+
+    # 2. Escaneo universal de patrones rítmicos/melódicos en cualquier ROM comercial o homebrew
+    for i in range(0, len(prg) - 64, 32):
+        chunk = list(prg[i:i + 32])
+        if all(0 <= b <= 23 for b in chunk) and 8 <= len(set(chunk)) <= 16 and chunk.count(0) >= 3:
+            if len(songs) < 8:
+                songs[f"Secuencia Musical ROM @ ${i:04X}"] = {
+                    "tempo": 7,
+                    "mel": chunk,
+                    "harm": [max(0, (x - 4) if x > 4 else 0) for x in chunk],
+                    "bass": [1 if step % 2 == 0 else 8 for step in range(32)],
+                    "drum": [1 if step % 4 == 0 else (2 if step % 4 == 2 else 3) for step in range(16)],
+                    "rom_offset": i,
+                }
+    st.session_state.songs = songs
+
+
+def analyze_asm_file(text: str, filename: str):
+    st.session_state.has_asm = True
     st.session_state.asm_name = filename
     st.session_state.asm_text = text
 
+    # Extraer todas las cadenas de texto (.byte "..." y macros PRINT)
     strings = []
     for m in re.finditer(r'(PRINT\s+\$[0-9A-Fa-f]+,\s*"|[A-Za-z0-9_]+:\s*\.byte\s+"|\.asciiz\s+")([^"]*)(")', text):
-        strings.append({"Prefijo": m.group(1), "Texto": m.group(2), "Longitud": len(m.group(2))})
+        strings.append({
+            "Identificador": m.group(1).strip().rstrip('"'),
+            "Texto": m.group(2),
+            "Caracteres": len(m.group(2)),
+            "_raw_prefix": m.group(1)
+        })
     st.session_state.asm_strings = strings
 
+    # Extraer todas las tablas numéricas (.byte ...)
     tables = {}
     for m in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*):\s*\n?((?:\s*\.byte\s+[^\n]+\n?)+)", text, re.MULTILINE):
         lbl = m.group(1)
@@ -277,17 +341,87 @@ def load_asm_source(text: str, filename: str):
 
     if "palette" in tables and len(tables["palette"]) >= 32:
         st.session_state.palette = tables["palette"][:32]
+    if "note_lo" in tables and "note_hi" in tables:
+        st.session_state.note_lo = tables["note_lo"]
+        st.session_state.note_hi = tables["note_hi"]
+
+    # Construir lista de canciones automáticamente a partir de las etiquetas del archivo .s
+    songs = {}
+    if "bgm_mel" in tables:
+        songs["1. Tema Principal del Juego (bgm)"] = {
+            "tempo": 6,
+            "mel": tables.get("bgm_mel", [0] * 64),
+            "harm": tables.get("bgm_harm", [0] * 64),
+            "bass": tables.get("bgm_bass", [0] * 64),
+            "drum": tables.get("bgm_drum", [0] * 16),
+            "labels": ("bgm_mel", "bgm_harm", "bgm_bass", "bgm_drum"),
+        }
+    if "susp_mel" in tables:
+        songs["2. Tema de Historia / Suspenso (susp)"] = {
+            "tempo": 12,
+            "mel": tables.get("susp_mel", [0] * 32),
+            "harm": tables.get("susp_pad", [0] * 32),
+            "bass": tables.get("susp_bass", [0] * 32),
+            "drum": tables.get("susp_drum", [0] * 16),
+            "labels": ("susp_mel", "susp_pad", "susp_bass", "susp_drum"),
+        }
+    if "sel_mel" in tables:
+        songs["3. Tema de Selección de Nave (sel)"] = {
+            "tempo": 7,
+            "mel": tables.get("sel_mel", [0] * 32),
+            "harm": tables.get("sel_pad", [0] * 32),
+            "bass": tables.get("sel_bass", [0] * 32),
+            "drum": tables.get("sel_drum", [0] * 16),
+            "labels": ("sel_mel", "sel_pad", "sel_bass", "sel_drum"),
+        }
+    if "go_notes" in tables:
+        songs["4. Tonada de Game Over (go_notes)"] = {
+            "tempo": 10,
+            "mel": tables["go_notes"],
+            "harm": [0] * len(tables["go_notes"]),
+            "bass": tables["go_notes"],
+            "drum": [0] * 8,
+            "labels": ("go_notes", None, None, None),
+        }
+
+    # Detectar cualquier otra tabla musical en otros archivos .s homebrew
+    for lbl, arr in tables.items():
+        if lbl not in ("bgm_mel", "bgm_harm", "bgm_bass", "bgm_drum", "susp_mel", "susp_pad", "susp_bass", "susp_drum", "sel_mel", "sel_pad", "sel_bass", "sel_drum", "go_notes"):
+            if any(k in lbl.lower() for k in ("mel", "song", "music", "note", "tune", "sfx", "jng")):
+                songs[f"Pista Detectada: {lbl}"] = {
+                    "tempo": 7,
+                    "mel": [min(23, x) for x in arr],
+                    "harm": [0] * len(arr),
+                    "bass": [0] * len(arr),
+                    "drum": [0] * 16,
+                    "labels": (lbl, None, None, None),
+                }
+
+    st.session_state.songs = songs
 
 
-def export_asm_source() -> bytes:
+# =============================================================================
+# FUNCIONES DE EXPORTACIÓN (.S Y .NES)
+# =============================================================================
+def build_updated_asm() -> bytes:
     text = st.session_state.asm_text
-    if not text:
-        return b"; No se ha cargado ningun archivo .s"
-
     for item in st.session_state.asm_strings:
-        pref_esc = re.escape(item["Prefijo"])
+        pref_esc = re.escape(item["_raw_prefix"])
         new_txt = item["Texto"]
         text = re.sub(rf'({pref_esc})[^"]*(")', rf'\g<1>{new_txt}\g<2>', text, count=1)
+
+    st.session_state.asm_tables["palette"] = st.session_state.palette
+    for s_data in st.session_state.songs.values():
+        lbls = s_data.get("labels")
+        if lbls:
+            if lbls[0]:
+                st.session_state.asm_tables[lbls[0]] = s_data["mel"]
+            if lbls[1]:
+                st.session_state.asm_tables[lbls[1]] = s_data["harm"]
+            if lbls[2]:
+                st.session_state.asm_tables[lbls[2]] = s_data["bass"]
+            if lbls[3]:
+                st.session_state.asm_tables[lbls[3]] = s_data["drum"]
 
     for lbl, vals in st.session_state.asm_tables.items():
         lines = []
@@ -302,13 +436,24 @@ def export_asm_source() -> bytes:
             count=1,
             flags=re.MULTILINE,
         )
-
     st.session_state.asm_text = text
     return text.encode("utf-8")
 
 
-def get_tile_pixels(chr_bank_idx: int, pat_table: int, tile_id: int):
-    offset = (chr_bank_idx * 8192) + (pat_table * 4096) + (tile_id * 16)
+def build_updated_nes() -> bytes:
+    hdr = bytearray(st.session_state.header)
+    prg = st.session_state.prg_data
+    chr_d = st.session_state.chr_data
+    if len(hdr) >= 6 and hdr[5] > 0:
+        return bytes(hdr + prg + chr_d)
+    return bytes(hdr + prg)
+
+
+# =============================================================================
+# RENDERIZADO DE TILES CHR, SPRITES Y AUDIO 2A03
+# =============================================================================
+def get_tile_matrix(bank_idx: int, table_idx: int, tile_id: int):
+    offset = (bank_idx * 8192) + (table_idx * 4096) + (tile_id * 16)
     mat = [[0] * 8 for _ in range(8)]
     chr_d = st.session_state.chr_data
     if offset + 16 > len(chr_d):
@@ -323,8 +468,8 @@ def get_tile_pixels(chr_bank_idx: int, pat_table: int, tile_id: int):
     return mat
 
 
-def set_tile_pixels(chr_bank_idx: int, pat_table: int, tile_id: int, mat):
-    offset = (chr_bank_idx * 8192) + (pat_table * 4096) + (tile_id * 16)
+def set_tile_matrix(bank_idx: int, table_idx: int, tile_id: int, mat):
+    offset = (bank_idx * 8192) + (table_idx * 4096) + (tile_id * 16)
     if offset + 16 > len(st.session_state.chr_data):
         return
     for y in range(8):
@@ -337,113 +482,68 @@ def set_tile_pixels(chr_bank_idx: int, pat_table: int, tile_id: int, mat):
         st.session_state.chr_data[offset + 8 + y] = b1
 
 
-def render_pattern_table(chr_bank_idx: int, pat_table: int, pal_group: int, highlight_tile: int = None):
+def render_chr_sheet(bank_idx: int, table_idx: int, pal_group: int, selected_tile: int):
     sub_pal = [nes_rgb(st.session_state.palette[pal_group * 4 + c]) for c in range(4)]
     img = Image.new("RGB", (128, 128))
     px = img.load()
     for t_id in range(256):
         tx = (t_id % 16) * 8
         ty = (t_id // 16) * 8
-        mat = get_tile_pixels(chr_bank_idx, pat_table, t_id)
+        mat = get_tile_matrix(bank_idx, table_idx, t_id)
         for y in range(8):
             for x in range(8):
                 px[tx + x, ty + y] = sub_pal[mat[y][x]]
     img = img.resize((384, 384), Image.NEAREST)
-    if highlight_tile is not None:
-        draw = ImageDraw.Draw(img)
-        sx = (highlight_tile % 16) * 24
-        sy = (highlight_tile // 16) * 24
-        draw.rectangle([sx, sy, sx + 23, sy + 23], outline=(0, 229, 255), width=2)
+    draw = ImageDraw.Draw(img)
+    sx = (selected_tile % 16) * 24
+    sy = (selected_tile // 16) * 24
+    draw.rectangle([sx, sy, sx + 23, sy + 23], outline=(37, 99, 235), width=3)
     return img
 
 
-def render_metasprite_16x16(chr_bank_idx: int, pat_table: int, tl: int, tr: int, bl: int, br: int, flip_h_right: bool, pal_group: int):
+def render_metasprite(bank_idx: int, table_idx: int, tl: int, tr: int, bl: int, br: int, mirror_right: bool, pal_group: int):
     sub_pal = [nes_rgb(st.session_state.palette[pal_group * 4 + c]) for c in range(4)]
     img = Image.new("RGB", (16, 16), sub_pal[0])
     px = img.load()
-    quads = [(0, 0, tl, False), (8, 0, tr, flip_h_right), (0, 8, bl, False), (8, 8, br, flip_h_right)]
-    for qx, qy, t_id, fl_h in quads:
-        mat = get_tile_pixels(chr_bank_idx, pat_table, t_id)
+    quads = [(0, 0, tl, False), (8, 0, tr, mirror_right), (0, 8, bl, False), (8, 8, br, mirror_right)]
+    for qx, qy, t_id, fl in quads:
+        mat = get_tile_matrix(bank_idx, table_idx, t_id)
         for y in range(8):
             for x in range(8):
-                sx = (7 - x) if fl_h else x
-                c = mat[y][sx]
-                px[qx + x, qy + y] = sub_pal[c]
+                sx = (7 - x) if fl else x
+                px[qx + x, qy + y] = sub_pal[mat[y][sx]]
     return img.resize((160, 160), Image.NEAREST)
 
 
-def disassemble_6502(prg_bytes: bytes, bank_idx: int, start_offset: int, num_lines: int = 45):
-    bank_size = 16384
-    base_rom = bank_idx * bank_size
-    cpu_base = 0xC000 if len(prg_bytes) == 16384 or bank_idx == (len(prg_bytes) // 16384 - 1) else 0x8000
-    pc = start_offset
-    lines = []
-
-    for _ in range(num_lines):
-        rom_pos = base_rom + pc
-        if rom_pos >= len(prg_bytes) or pc >= bank_size:
-            break
-        op = prg_bytes[rom_pos]
-        cpu_addr = cpu_base + pc
-        mnem, mode, size = OPCODES_6502.get(op, (".BYTE", "raw", 1))
-        raw_chunk = prg_bytes[rom_pos:min(len(prg_bytes), rom_pos + size)]
-        hex_str = " ".join(f"{b:02X}" for b in raw_chunk)
-
-        if mode == "raw" or len(raw_chunk) < size:
-            operand = f"${op:02X}"
-            size = 1
-        elif mode == "imp":
-            operand = ""
-        elif mode == "acc":
-            operand = "A"
-        elif mode == "imm":
-            operand = f"#${raw_chunk[1]:02X}"
-        elif mode == "zp":
-            operand = f"${raw_chunk[1]:02X}"
-        elif mode == "zpx":
-            operand = f"${raw_chunk[1]:02X},X"
-        elif mode == "zpy":
-            operand = f"${raw_chunk[1]:02X},Y"
-        elif mode == "indx":
-            operand = f"(${raw_chunk[1]:02X},X)"
-        elif mode == "indy":
-            operand = f"(${raw_chunk[1]:02X}),Y"
-        elif mode == "abs":
-            addr = raw_chunk[1] | (raw_chunk[2] << 8)
-            operand = f"${addr:04X}"
-        elif mode == "absx":
-            addr = raw_chunk[1] | (raw_chunk[2] << 8)
-            operand = f"${addr:04X},X"
-        elif mode == "absy":
-            addr = raw_chunk[1] | (raw_chunk[2] << 8)
-            operand = f"${addr:04X},Y"
-        elif mode == "ind":
-            addr = raw_chunk[1] | (raw_chunk[2] << 8)
-            operand = f"(${addr:04X})"
-        elif mode == "rel":
-            signed_ofs = raw_chunk[1] - 256 if raw_chunk[1] >= 128 else raw_chunk[1]
-            target = (cpu_addr + 2 + signed_ofs) & 0xFFFF
-            operand = f"${target:04X}"
-        else:
-            operand = ""
-
-        lines.append(f"${cpu_addr:04X}  {hex_str:<8s}  {mnem:<4s} {operand}")
-        pc += size
-
-    return "\n".join(lines)
-
-
-def synthesize_tracker_wav(tracker_rows, step_frames=6):
+def synthesize_song_wav(song_dict: dict) -> bytes:
     sample_rate = 22050
+    step_frames = song_dict.get("tempo", 6)
+    mel = song_dict["mel"]
+    harm = song_dict["harm"]
+    bass = song_dict["bass"]
+    drum = song_dict["drum"]
+
+    n_lo = st.session_state.note_lo
+    n_hi = st.session_state.note_hi
+
+    def get_freq(n_idx, is_tri=False):
+        if n_idx <= 0 or n_idx >= len(n_lo):
+            return 0.0
+        period = (n_hi[n_idx] << 8) | n_lo[n_idx]
+        if period <= 0:
+            return 0.0
+        return 1789773.0 / ((32.0 if is_tri else 16.0) * (period + 1))
+
     samples_per_step = int(sample_rate * (step_frames / 60.0))
     pcm = bytearray()
     lfsr = 1
+    num_steps = min(128, len(mel))
 
-    for row in tracker_rows:
-        f1 = NOTE_FREQS[NOTE_TO_IDX.get(row["Pulso_1"], 0)]
-        f2 = NOTE_FREQS[NOTE_TO_IDX.get(row["Pulso_2"], 0)]
-        ft = NOTE_FREQS[NOTE_TO_IDX.get(row["Triangulo"], 0)] * 0.5
-        dh = DRUM_TO_IDX.get(row["Ruido"], 0)
+    for s in range(num_steps):
+        f1 = get_freq(mel[s], False)
+        f2 = get_freq(harm[s] if s < len(harm) else 0, False)
+        ft = get_freq(bass[s] if s < len(bass) else 0, True)
+        dh = drum[s % len(drum)] if drum else 0
 
         for i in range(samples_per_step):
             t = i / sample_rate
@@ -482,278 +582,403 @@ def synthesize_tracker_wav(tracker_rows, step_frames=6):
     return buf.getvalue()
 
 
+def disassemble_6502(prg_bytes: bytes, bank_idx: int, start_offset: int, num_lines: int = 40):
+    bank_size = 16384
+    base_rom = bank_idx * bank_size
+    cpu_base = 0xC000 if len(prg_bytes) == 16384 or bank_idx == (len(prg_bytes) // 16384 - 1) else 0x8000
+    pc = start_offset
+    lines = []
+
+    for _ in range(num_lines):
+        rom_pos = base_rom + pc
+        if rom_pos >= len(prg_bytes) or pc >= bank_size:
+            break
+        op = prg_bytes[rom_pos]
+        cpu_addr = cpu_base + pc
+        mnem, mode, size = OPCODES_6502.get(op, (".BYTE", "raw", 1))
+        raw_chunk = prg_bytes[rom_pos:min(len(prg_bytes), rom_pos + size)]
+        hex_str = " ".join(f"{b:02X}" for b in raw_chunk)
+
+        if mode == "raw" or len(raw_chunk) < size:
+            operand, size = f"${op:02X}", 1
+        elif mode == "imp":
+            operand = ""
+        elif mode == "acc":
+            operand = "A"
+        elif mode == "imm":
+            operand = f"#${raw_chunk[1]:02X}"
+        elif mode == "zp":
+            operand = f"${raw_chunk[1]:02X}"
+        elif mode == "zpx":
+            operand = f"${raw_chunk[1]:02X},X"
+        elif mode == "zpy":
+            operand = f"${raw_chunk[1]:02X},Y"
+        elif mode == "indx":
+            operand = f"(${raw_chunk[1]:02X},X)"
+        elif mode == "indy":
+            operand = f"(${raw_chunk[1]:02X}),Y"
+        elif mode == "abs":
+            operand = f"${raw_chunk[1] | (raw_chunk[2] << 8):04X}"
+        elif mode == "absx":
+            operand = f"${raw_chunk[1] | (raw_chunk[2] << 8):04X},X"
+        elif mode == "absy":
+            operand = f"${raw_chunk[1] | (raw_chunk[2] << 8):04X},Y"
+        elif mode == "ind":
+            operand = f"(${raw_chunk[1] | (raw_chunk[2] << 8):04X})"
+        elif mode == "rel":
+            signed_ofs = raw_chunk[1] - 256 if raw_chunk[1] >= 128 else raw_chunk[1]
+            operand = f"${(cpu_addr + 2 + signed_ofs) & 0xFFFF:04X}"
+        else:
+            operand = ""
+
+        lines.append(f"${cpu_addr:04X}   {hex_str:<8s}   {mnem:<4s} {operand}")
+        pc += size
+    return "\n".join(lines)
+
+
+# =============================================================================
+# FLUJO PRINCIPAL DE LA APLICACIÓN
+# =============================================================================
 init_state()
 
+st.title("🕹️ NES Shooter Studio")
+st.markdown("Suite visual universal para analizar y modificar ROMs de Nintendo NES (`*.nes`) y código fuente en ensamblador 6502 (`*.s` / `*.asm`).")
+
+# -----------------------------------------------------------------------------
+# PASO 1: PANTALLA LIMPIA HASTA QUE SE SUBA UN ARCHIVO .NES O .S
+# -----------------------------------------------------------------------------
+if not st.session_state.has_nes and not st.session_state.has_asm:
+    st.markdown("""
+    <div class="studio-card">
+        <h3>📂 Paso 1: Sube tu archivo para comenzar el análisis</h3>
+        <p>Selecciona cualquier archivo <b>.nes</b> (ROM compilada comercial o homebrew) o un archivo <b>.s / .asm</b> (código fuente en ensamblador 6502). Una vez subido, la aplicación analizará sus bancos gráficos, textos, tablas, vectores y canciones automáticamente.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    u_col1, u_col2 = st.columns(2)
+    with u_col1:
+        up_nes_main = st.file_uploader("💿 Subir archivo ROM (*.nes)", type=["nes"], key="main_nes_up")
+        if up_nes_main is not None:
+            analyze_nes_file(bytearray(up_nes_main.read()), up_nes_main.name)
+            st.rerun()
+    with u_col2:
+        up_asm_main = st.file_uploader("📝 Subir código ensamblador (*.s / *.asm)", type=["s", "asm"], key="main_asm_up")
+        if up_asm_main is not None:
+            analyze_asm_file(up_asm_main.read().decode("utf-8", errors="ignore"), up_asm_main.name)
+            st.rerun()
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# BARRA LATERAL (GESTIÓN DE ARCHIVOS CARGADOS Y DESCARGAS)
+# -----------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## 📂 Selector Universal de Archivos")
-    st.caption("Abre cualquier ROM `.nes` (comercial o homebrew), banco `.chr` o código `.s`/`.asm`.")
+    st.header("📂 Archivos en Sesión")
+    if st.session_state.has_nes:
+        st.success(f"💿 ROM: {st.session_state.nes_name}")
+    if st.session_state.has_asm:
+        st.success(f"📝 ASM: {st.session_state.asm_name}")
 
-    up_nes = st.file_uploader("💿 Cargar ROM de NES (.nes)", type=["nes"])
-    if up_nes is not None:
-        if st.button("📥 Abrir ROM .nes", use_container_width=True):
-            load_nes_rom(bytearray(up_nes.read()), up_nes.name)
-            st.success(f"ROM cargada: {up_nes.name}")
+    st.markdown("**Cargar o añadir otro archivo:**")
+    side_nes = st.file_uploader("Cambiar / Añadir ROM (.nes)", type=["nes"], key="side_nes")
+    if side_nes is not None:
+        if st.button("📥 Analizar esta ROM .nes", use_container_width=True):
+            analyze_nes_file(bytearray(side_nes.read()), side_nes.name)
+            st.rerun()
 
-    up_chr = st.file_uploader("🎨 Cargar Banco Gráfico (.chr / .bin)", type=["chr", "bin"])
-    if up_chr is not None:
-        if st.button("📥 Importar CHR", use_container_width=True):
-            raw_chr = bytearray(up_chr.read())
-            if len(raw_chr) >= 4096:
-                st.session_state.chr_data = raw_chr
-                st.success(f"CHR cargado ({len(raw_chr):,} bytes)")
-
-    up_asm = st.file_uploader("📝 Cargar Código 6502 (.s / .asm)", type=["s", "asm"])
-    if up_asm is not None:
-        if st.button("📥 Procesar Código .s", use_container_width=True):
-            load_asm_source(up_asm.read().decode("utf-8", errors="ignore"), up_asm.name)
-            st.success(f"Código cargado: {up_asm.name}")
+    side_asm = st.file_uploader("Cambiar / Añadir Código (.s)", type=["s", "asm"], key="side_asm")
+    if side_asm is not None:
+        if st.button("📥 Analizar este Código .s", use_container_width=True):
+            analyze_asm_file(side_asm.read().decode("utf-8", errors="ignore"), side_asm.name)
+            st.rerun()
 
     st.divider()
-    st.markdown("## 💾 Exportar Archivos")
-    st.download_button(
-        "⬇️ Descargar ROM (.nes) modificada",
-        data=export_nes_rom(),
-        file_name=f"mod_{st.session_state.rom_name}",
-        mime="application/octet-stream",
-        use_container_width=True,
-    )
-    st.download_button(
-        "⬇️ Exportar Bancos Gráficos (.chr)",
-        data=bytes(st.session_state.chr_data),
-        file_name="graphics.chr",
-        mime="application/octet-stream",
-        use_container_width=True,
-    )
-    if st.session_state.asm_text:
+    st.header("💾 Guardar Cambios")
+    if st.session_state.has_nes:
         st.download_button(
-            "⬇️ Descargar Código (.s) modificado",
-            data=export_asm_source(),
+            "⬇️ Descargar ROM (.nes) Modificada",
+            data=build_updated_nes(),
+            file_name=f"mod_{st.session_state.nes_name}",
+            mime="application/octet-stream",
+            use_container_width=True,
+        )
+    if st.session_state.has_asm:
+        st.download_button(
+            "⬇️ Descargar Código (.s) Modificado",
+            data=build_updated_asm(),
             file_name=st.session_state.asm_name,
             mime="text/plain",
             use_container_width=True,
         )
 
-st.title("🕹️ NES SHOOTER STUDIO — Inspector y Editor Universal de ROMs y Homebrew")
-st.caption(f"**ROM Activa:** `{st.session_state.rom_name}` | **Código 6502 Activo:** `{st.session_state.asm_name}` | **Licencia:** `CC0 1.0 Universal`")
+    st.divider()
+    if st.button("🔄 Cerrar archivos y volver al inicio", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 
-tab_chr, tab_txt, tab_map, tab_mus, tab_dis = st.tabs([
-    "🎨 Visor y Editor CHR / Sprites",
-    "📝 Editor de Textos y Tablas (.nes / .s)",
-    "🗺️ Constructor de Mapas (Nametable)",
-    "🎵 Estudio Chiptune (2A03)",
-    "🔍 Inspector iNES y Desensamblador 6502"
+# -----------------------------------------------------------------------------
+# PESTAÑAS DINÁMICAS SEGÚN LOS ARCHIVOS ANALIZADOS
+# -----------------------------------------------------------------------------
+tab_spr, tab_mus, tab_txt, tab_ins = st.tabs([
+    "🎨 1. Visor y Editor de Sprites",
+    "🎵 2. Canciones Chiptune (2A03)",
+    "📝 3. Editor de Textos y Parámetros",
+    "🔍 4. Inspector de ROM y Código 6502"
 ])
 
-with tab_chr:
-    num_chr_banks = max(1, len(st.session_state.chr_data) // 8192)
-    c1, c2, c3 = st.columns([1.15, 1.15, 1])
+# =============================================================================
+# PESTAÑA 1: VISOR Y EDITOR DE SPRITES
+# =============================================================================
+with tab_spr:
+    if not st.session_state.has_nes:
+        st.info("💡 Sube un archivo **.nes** en el panel izquierdo para visualizar y editar los gráficos CHR-ROM y los sprites.")
+    else:
+        num_chr = max(1, len(st.session_state.chr_data) // 8192)
+        col_s1, col_s2, col_s3 = st.columns([1.15, 1.15, 1])
 
-    with c1:
-        st.subheader("🧩 Explorador de Bancos CHR")
-        bank_sel = st.selectbox("Banco CHR de 8 KB:", range(num_chr_banks), format_func=lambda i: f"Banco CHR #{i} (${i*0x2000:04X})")
-        pat_sel = st.radio("Tabla de Patrones PPU:", [0, 1], format_func=lambda p: "Tabla 0 ($0000 - Fondo/Sprites)" if p == 0 else "Tabla 1 ($1000 - Sprites/Fondo)", horizontal=True, index=1)
-        pal_sel = st.selectbox("Sub-Paleta de Previsualización:", range(8), index=4, format_func=lambda g: f"Paleta #{g} ({'BG' if g < 4 else 'Sprite'} {g % 4})")
-        tile_id = st.number_input("Tile Seleccionado (0..255):", 0, 255, 128)
+        with col_s1:
+            st.subheader("1. Selecciona un Bloque Gráfico")
+            b_idx = st.selectbox("Banco Gráfico CHR (8 KB):", range(num_chr), format_func=lambda i: f"Banco #{i}")
+            t_idx = st.radio("Tabla de Patrones:", [0, 1], format_func=lambda x: "Tabla 0: Fondo / Escenario" if x == 0 else "Tabla 1: Naves / Personajes", horizontal=True, index=1)
+            p_grp = st.selectbox("Paleta de Color:", range(8), index=4, format_func=lambda g: f"Paleta #{g} ({'Fondo' if g < 4 else 'Sprite'})")
+            tile_num = st.number_input("Número de Tile a editar (0 a 255):", 0, 255, 128)
 
-        st.image(render_pattern_table(bank_sel, pat_sel, pal_sel, tile_id), caption=f"Banco #{bank_sel} - Tabla #{pat_sel} (Tile #{tile_id} / ${tile_id:02X})")
+            st.image(render_chr_sheet(b_idx, t_idx, p_grp, tile_num), caption=f"Mapa completo de 256 tiles (Tile #{tile_num} seleccionado en azul)")
 
-    with c2:
-        st.subheader(f"✏️ Editor de Píxeles 8×8 (Tile ${tile_id:02X})")
-        st.caption("Edita los valores `0..3` de cada píxel y guarda los cambios directamente en la ROM:")
-        mat = get_tile_pixels(bank_sel, pat_sel, tile_id)
-        ed_mat = st.data_editor(mat, use_container_width=True, key=f"ed_{bank_sel}_{pat_sel}_{tile_id}")
-        if st.button("💾 Guardar Tile en CHR", use_container_width=True):
-            set_tile_pixels(bank_sel, pat_sel, tile_id, ed_mat)
-            st.rerun()
-
-        st.markdown("**Personalizar Colores de la Sub-Paleta Activa:**")
-        p_cols = st.columns(4)
-        for c_i in range(4):
-            with p_cols[c_i]:
-                p_idx = pal_sel * 4 + c_i
-                st.session_state.palette[p_idx] = st.number_input(f"Color {c_i} (0..63)", 0, 63, int(st.session_state.palette[p_idx]), key=f"pal_{p_idx}")
-                hx = rgb_hex(nes_rgb(st.session_state.palette[p_idx]))
-                st.markdown(f"<div style='height:18px;background:{hx};border:1px solid #fff;'></div>", unsafe_allow_html=True)
-
-    with c3:
-        st.subheader("👾 Armador de Metasprites 16×16")
-        st.caption("Combina cualquier grupo de 4 tiles de la ROM para visualizar personajes o naves:")
-        ms_c1, ms_c2 = st.columns(2)
-        with ms_c1:
-            t_tl = st.number_input("Tile Sup-Izq", 0, 255, tile_id)
-            t_bl = st.number_input("Tile Inf-Izq", 0, 255, min(255, tile_id + 1))
-        with ms_c2:
-            t_tr = st.number_input("Tile Sup-Der", 0, 255, tile_id)
-            t_br = st.number_input("Tile Inf-Der", 0, 255, min(255, tile_id + 1))
-        mirror_r = st.checkbox("Espejar horizontalmente mitad derecha (Simetría)", value=True)
-        st.image(render_metasprite_16x16(bank_sel, pat_sel, t_tl, t_tr, t_bl, t_br, mirror_r, pal_sel), caption="Vista Previa Metasprite 16×16")
-
-with tab_txt:
-    t_col1, t_col2 = st.columns(2)
-
-    with t_col1:
-        st.subheader("🔤 Parcheador de Textos en Binario (.nes)")
-        st.caption("Escanea cadenas ASCII dentro de `PRG-ROM` y permite reemplazarlas directamente en la ROM:")
-        prg = st.session_state.prg_data
-        matches = list(re.finditer(rb"[A-Za-z0-9\-\.,!# ]{5,}", bytes(prg)))
-        if matches:
-            rom_strs = [
-                {"Offset_Hex": f"${m.start():04X}", "Texto_Original": m.group(0).decode("ascii", errors="ignore"), "Nuevo_Texto": m.group(0).decode("ascii", errors="ignore"), "Max_Len": len(m.group(0))}
-                for m in matches[:40]
-            ]
-            ed_rom_strs = st.data_editor(rom_strs, disabled=["Offset_Hex", "Texto_Original", "Max_Len"], use_container_width=True, height=340)
-            if st.button("✔ Parchear Textos en PRG-ROM", use_container_width=True):
-                for row in ed_rom_strs:
-                    ofs = int(row["Offset_Hex"][1:], 16)
-                    ln = int(row["Max_Len"])
-                    new_b = row["Nuevo_Texto"][:ln].ljust(ln).encode("ascii", errors="replace")
-                    st.session_state.prg_data[ofs:ofs + ln] = new_b
-                st.success("Textos parcheados exitosamente en el binario de la ROM.")
-        else:
-            st.info("Carga una ROM .nes en la barra lateral para escanear sus cadenas de texto.")
-
-    with t_col2:
-        st.subheader("📜 Editor de Textos y Tablas de Código (.s / .asm)")
-        if st.session_state.asm_text:
-            if st.session_state.asm_strings:
-                st.markdown("**Cadenas de Texto detectadas en `.s`:**")
-                st.session_state.asm_strings = st.data_editor(st.session_state.asm_strings, disabled=["Prefijo", "Longitud"], use_container_width=True, height=200)
-
-            if st.session_state.asm_tables:
-                tbl_name = st.selectbox("Editar Tabla de Datos (`.byte`) del archivo `.s`:", list(st.session_state.asm_tables.keys()))
-                cur_vals = st.session_state.asm_tables[tbl_name]
-                raw_ed = st.text_area(f"Valores de `{tbl_name}` ({len(cur_vals)} bytes):", ", ".join(str(x) for x in cur_vals), height=120)
-                if st.button(f"✔ Actualizar Tabla `{tbl_name}`", use_container_width=True):
-                    nums = [int(t) for t in re.findall(r"\d+", raw_ed)]
-                    if nums:
-                        st.session_state.asm_tables[tbl_name] = nums
-                        st.success(f"Tabla {tbl_name} actualizada.")
-        else:
-            st.info("Carga cualquier archivo `.s` o `.asm` en la barra lateral para editar sus textos y tablas `.byte` de forma visual.")
-
-with tab_map:
-    nm_c1, nm_c2 = st.columns([1.3, 1])
-    with nm_c1:
-        st.subheader("🖥️ Visor de Nametable PPU (32×30 Tiles / 256×240 px)")
-        map_chr_bank = st.selectbox("Usar Banco CHR:", range(num_chr_banks), key="map_chr_b")
-        map_pat = st.radio("Tabla de Patrones de Fondo:", [0, 1], horizontal=True, key="map_pt")
-        map_pal = st.selectbox("Paleta de Fondo:", range(4), key="map_pal")
-
-        sub_p = [nes_rgb(st.session_state.palette[map_pal * 4 + c]) for c in range(4)]
-        nt_img = Image.new("RGB", (256, 240), sub_p[0])
-        nt_px = nt_img.load()
-        nt_data = st.session_state.nametable
-        for ty in range(30):
-            for tx in range(32):
-                t_id = nt_data[ty * 32 + tx]
-                mat = get_tile_pixels(map_chr_bank, map_pat, t_id)
-                for py in range(8):
-                    for px_i in range(8):
-                        nt_px[tx * 8 + px_i, ty * 8 + py] = sub_p[mat[py][px_i]]
-        st.image(nt_img.resize((512, 480), Image.NEAREST), caption="Previsualización de Pantalla Completa (Nametable)")
-
-    with nm_c2:
-        st.subheader("🛠️ Herramientas de Nametable")
-        up_nam = st.file_uploader("Importar archivo Nametable (.nam / 960-1024 B)", type=["nam", "bin"])
-        if up_nam is not None:
-            nam_b = bytearray(up_nam.read())
-            if len(nam_b) >= 960:
-                st.session_state.nametable = nam_b[:960]
+        with col_s2:
+            st.subheader(f"2. Editor del Tile #{tile_num}")
+            st.caption("Cambia los valores (0=Transparente, 1=Color 1, 2=Color 2, 3=Color 3) y pulsa Aplicar:")
+            cur_mat = get_tile_matrix(b_idx, t_idx, tile_num)
+            new_mat = st.data_editor(cur_mat, use_container_width=True, key=f"tile_grid_{b_idx}_{t_idx}_{tile_num}")
+            if st.button("✔ Aplicar cambios al Tile", use_container_width=True):
+                set_tile_matrix(b_idx, t_idx, tile_num, new_mat)
+                st.success(f"Tile #{tile_num} actualizado en la ROM.")
                 st.rerun()
 
-        if st.button("🎲 Generar Mapa con Tiles del Banco Actual", use_container_width=True):
-            for ty in range(30):
-                for tx in range(32):
-                    st.session_state.nametable[ty * 32 + tx] = ((ty * 32 + tx) % 14) + 1
-            st.rerun()
+            st.markdown("**Colores de la Paleta seleccionada (0 a 63 de la NES):**")
+            pc = st.columns(4)
+            for ci in range(4):
+                with pc[ci]:
+                    p_pos = p_grp * 4 + ci
+                    st.session_state.palette[p_pos] = st.number_input(f"C{ci}", 0, 63, int(st.session_state.palette[p_pos]), key=f"p_{p_pos}")
+                    hx = rgb_hex(nes_rgb(st.session_state.palette[p_pos]))
+                    st.markdown(f"<div style='height:22px;background:{hx};border:2px solid #334155;border-radius:4px;'></div>", unsafe_allow_html=True)
 
-        st.download_button(
-            "⬇️ Exportar Nametable (.nam)",
-            data=bytes(st.session_state.nametable),
-            file_name="screen.nam",
-            mime="application/octet-stream",
-            use_container_width=True,
-        )
+        with col_s3:
+            st.subheader("3. Visor de Sprite 16×16")
+            st.caption("Previsualiza cómo se ve la nave o personaje completo uniendo sus tiles superior e inferior:")
+            top_t = st.number_input("Tile Mitad Superior:", 0, 255, tile_num)
+            bot_t = st.number_input("Tile Mitad Inferior:", 0, 255, min(255, tile_num + 1))
+            sym_mode = st.checkbox("Simetría horizontal automática (Espejo)", value=True)
+            st.image(render_metasprite(b_idx, t_idx, top_t, top_t, bot_t, bot_t, sym_mode, p_grp), caption="Vista previa de Sprite 16×16")
 
+# =============================================================================
+# PESTAÑA 2: CANCIONES CHIPTUNE DETECTADAS Y EDITOR SIMPLE
+# =============================================================================
 with tab_mus:
-    st.subheader("🎹 Tracker Chiptune 2A03 y Sintetizador en el Navegador")
-    m_c1, m_c2 = st.columns([1, 1.6])
+    st.subheader("🎵 Canciones y Secuencias Chiptune Detectadas")
+    songs = st.session_state.songs
 
-    with m_c1:
-        tempo_frames = st.slider("Velocidad del Secuenciador (Cuadros por Paso):", 3, 18, 6)
-        wav_data = synthesize_tracker_wav(st.session_state.tracker, tempo_frames)
-        st.audio(wav_data, format="audio/wav")
-        st.download_button("⬇️ Descargar Audio Sintetizado (.wav)", data=wav_data, file_name="nes_chiptune.wav", mime="audio/wav", use_container_width=True)
+    if not songs:
+        st.warning("No se detectaron tablas musicales automáticamente en este archivo.")
+    else:
+        m_col1, m_col2 = st.columns([1, 1.5])
+        with m_col1:
+            song_names = list(songs.keys())
+            sel_song_name = st.selectbox("🎼 Elige una canción de la lista:", song_names)
+            active_song = songs[sel_song_name]
 
-        if st.session_state.asm_tables:
-            st.markdown("**Importar Pista desde Tabla `.s`:**")
-            mel_tbl = st.selectbox("Tabla para Pulso 1:", list(st.session_state.asm_tables.keys()))
-            if st.button("📥 Cargar Tabla en el Tracker", use_container_width=True):
-                arr = st.session_state.asm_tables[mel_tbl]
-                for i in range(min(32, len(arr))):
-                    n_idx = arr[i] if arr[i] < len(NOTE_NAMES) else 0
-                    st.session_state.tracker[i]["Pulso_1"] = NOTE_NAMES[n_idx]
+            active_song["tempo"] = st.slider(
+                "Velocidad de la canción (menor número = más rápido):",
+                min_value=3, max_value=18, value=int(active_song.get("tempo", 6))
+            )
+
+            wav_bytes = synthesize_song_wav(active_song)
+            st.markdown("**🔊 Reproductor integrado (Chip 2A03):**")
+            st.audio(wav_bytes, format="audio/wav")
+
+            st.download_button(
+                "⬇️ Descargar esta canción en formato .WAV",
+                data=wav_bytes,
+                file_name=f"{sel_song_name[:20].strip()}.wav",
+                mime="audio/wav",
+                use_container_width=True,
+            )
+
+        with m_col2:
+            st.markdown(f"**🎹 Editor Paso a Paso: `{sel_song_name}`**")
+            st.caption("Haz clic en cualquier celda para cambiar la nota musical o el golpe de batería y pulsa el botón de abajo para escuchar tu cambio:")
+
+            mel_arr = active_song["mel"]
+            harm_arr = active_song["harm"]
+            bass_arr = active_song["bass"]
+            drum_arr = active_song["drum"]
+
+            total_blocks = max(1, (len(mel_arr) + 15) // 16)
+            blk = 0
+            if total_blocks > 1:
+                blk = st.selectbox("Compás / Bloque de 16 pasos a editar:", range(total_blocks), format_func=lambda b: f"Compás #{b + 1} (Pasos {b*16} a {b*16 + 15})")
+
+            start_s = blk * 16
+            end_s = min(len(mel_arr), start_s + 16)
+
+            step_rows = []
+            for s in range(start_s, end_s):
+                m_v = mel_arr[s] if s < len(mel_arr) else 0
+                h_v = harm_arr[s] if s < len(harm_arr) else 0
+                b_v = bass_arr[s] if s < len(bass_arr) else 0
+                d_v = drum_arr[s % len(drum_arr)] if drum_arr else 0
+                step_rows.append({
+                    "Paso": f"Paso {s:02d}",
+                    "Melodia": NOTE_NAMES[m_v] if m_v < len(NOTE_NAMES) else NOTE_NAMES[0],
+                    "Armonia": NOTE_NAMES[h_v] if h_v < len(NOTE_NAMES) else NOTE_NAMES[0],
+                    "Bajo": NOTE_NAMES[b_v] if b_v < len(NOTE_NAMES) else NOTE_NAMES[0],
+                    "Bateria": DRUM_NAMES[d_v] if d_v < len(DRUM_NAMES) else DRUM_NAMES[0],
+                })
+
+            ed_steps = st.data_editor(
+                step_rows,
+                disabled=["Paso"],
+                column_config={
+                    "Melodia": st.column_config.SelectboxColumn("Pulso 1 (Melodía)", options=NOTE_NAMES),
+                    "Armonia": st.column_config.SelectboxColumn("Pulso 2 (Armonía)", options=NOTE_NAMES),
+                    "Bajo": st.column_config.SelectboxColumn("Triángulo (Bajo)", options=NOTE_NAMES),
+                    "Bateria": st.column_config.SelectboxColumn("Ruido (Batería)", options=DRUM_NAMES),
+                },
+                use_container_width=True,
+                height=380,
+                key=f"song_ed_{sel_song_name}_{blk}"
+            )
+
+            if st.button("✔ Actualizar Canción y Escuchar", use_container_width=True):
+                for idx_r, r in enumerate(ed_steps):
+                    pos = start_s + idx_r
+                    if pos < len(mel_arr):
+                        mel_arr[pos] = NOTE_TO_IDX.get(r["Melodia"], 0)
+                    if pos < len(harm_arr):
+                        harm_arr[pos] = NOTE_TO_IDX.get(r["Armonia"], 0)
+                    if pos < len(bass_arr):
+                        bass_arr[pos] = NOTE_TO_IDX.get(r["Bajo"], 0)
+                    if (pos % len(drum_arr)) < len(drum_arr):
+                        drum_arr[pos % len(drum_arr)] = DRUM_TO_IDX.get(r["Bateria"], 0)
+
+                # Si la canción proviene del binario .nes, escribir también en PRG-ROM
+                if "rom_offset" in active_song and st.session_state.has_nes:
+                    rofs = active_song["rom_offset"]
+                    for i_m, v_m in enumerate(mel_arr):
+                        if rofs + i_m < len(st.session_state.prg_data):
+                            st.session_state.prg_data[rofs + i_m] = v_m
                 st.rerun()
 
-    with m_c2:
-        st.session_state.tracker = st.data_editor(
-            st.session_state.tracker,
-            column_config={
-                "Pulso_1": st.column_config.SelectboxColumn("Pulso 1 (Lead)", options=NOTE_NAMES),
-                "Pulso_2": st.column_config.SelectboxColumn("Pulso 2 (Armonía)", options=NOTE_NAMES),
-                "Triangulo": st.column_config.SelectboxColumn("Triángulo (Bajo)", options=NOTE_NAMES),
-                "Ruido": st.column_config.SelectboxColumn("Ruido (Percusión)", options=DRUM_NAMES),
-            },
-            use_container_width=True,
-            height=380,
-        )
+# =============================================================================
+# PESTAÑA 3: EDITOR DE TEXTOS Y PARÁMETROS
+# =============================================================================
+with tab_txt:
+    col_t1, col_t2 = st.columns(2)
 
-with tab_dis:
-    st.subheader("🔍 Cabecera iNES, Vectores de Hardware y Desensamblador 6502")
-    hdr = st.session_state.header
-    prg = st.session_state.prg_data
-    chr_d = st.session_state.chr_data
+    with col_t1:
+        st.subheader("📝 Textos del Archivo Ensamblador (.s)")
+        if not st.session_state.has_asm:
+            st.info("Sube un archivo **.s / .asm** para editar sus textos, líneas de historia y parámetros con nombre.")
+        else:
+            if st.session_state.asm_strings:
+                st.caption("Modifica cualquier texto en la columna **Texto**:")
+                ed_asm_s = st.data_editor(
+                    st.session_state.asm_strings,
+                    column_order=("Identificador", "Texto", "Caracteres"),
+                    disabled=["Identificador", "Caracteres"],
+                    use_container_width=True,
+                    height=380,
+                )
+                st.session_state.asm_strings = ed_asm_s
 
-    prg_banks = hdr[4]
-    chr_banks = hdr[5]
-    f6, f7 = hdr[6], hdr[7]
-    mapper_id = (f7 & 0xF0) | (f6 >> 4)
-    mirror_str = "Four-Screen" if (f6 & 8) else ("Vertical" if (f6 & 1) else "Horizontal")
-    sram_str = "Sí (Batería)" if (f6 & 2) else "No"
+                story_preview = [r["Texto"] for r in ed_asm_s if "st_l" in r["Identificador"]]
+                if story_preview:
+                    st.markdown("**Vista previa en pantalla de TV NES:**")
+                    st.markdown(f'<div class="tv-preview">' + "\n".join(story_preview) + '</div>', unsafe_allow_html=True)
 
-    nmi_vec = prg[-6] | (prg[-5] << 8) if len(prg) >= 6 else 0
-    rst_vec = prg[-4] | (prg[-3] << 8) if len(prg) >= 6 else 0
-    irq_vec = prg[-2] | (prg[-1] << 8) if len(prg) >= 6 else 0
+    with col_t2:
+        st.subheader("🔤 Textos Internos del Binario (.nes)")
+        if not st.session_state.has_nes:
+            st.info("Sube un archivo **.nes** para escanear y parchear los textos guardados dentro de la ROM.")
+        else:
+            prg = st.session_state.prg_data
+            found = list(re.finditer(rb"[A-Za-z0-9\-\.,!# ]{5,}", bytes(prg)))
+            if found:
+                st.caption("Edita la columna **Texto_En_ROM** (se ajustará automáticamente al tamaño exacto para no dañar la ROM):")
+                rom_rows = [
+                    {
+                        "Direccion": f"${m.start():04X}",
+                        "Texto_En_ROM": m.group(0).decode("ascii", errors="ignore"),
+                        "Largo_Max": len(m.group(0)),
+                    }
+                    for m in found[:45]
+                ]
+                ed_rom = st.data_editor(rom_rows, disabled=["Direccion", "Largo_Max"], use_container_width=True, height=380)
+                if st.button("✔ Aplicar Textos en la ROM (.nes)", use_container_width=True):
+                    for r in ed_rom:
+                        ofs = int(r["Direccion"][1:], 16)
+                        ln = int(r["Largo_Max"])
+                        st.session_state.prg_data[ofs:ofs + ln] = r["Texto_En_ROM"][:ln].ljust(ln).encode("ascii", errors="replace")
+                    st.success("✔ Textos actualizados en la ROM.")
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Mapper ID", f"#{mapper_id}", MAPPER_NAMES.get(mapper_id, "Mapper Especial"))
-    k2.metric("PRG-ROM (Código)", f"{len(prg) // 1024} KB ({prg_banks} bancos)")
-    k3.metric("CHR-ROM / RAM", f"{len(chr_d) // 1024} KB ({'CHR-RAM' if chr_banks == 0 else f'{chr_banks} bancos'})")
-    k4.metric("Mirroring / SRAM", f"{mirror_str} / {sram_str}")
+# =============================================================================
+# PESTAÑA 4: INSPECTOR TÉCNICO DE ROM Y DESENSAMBLADOR 6502
+# =============================================================================
+with tab_ins:
+    if st.session_state.has_nes:
+        st.subheader(f"🔍 Análisis Técnico de `{st.session_state.nes_name}`")
+        hdr = st.session_state.header
+        prg = st.session_state.prg_data
+        chr_d = st.session_state.chr_data
 
-    st.markdown(f"""
-    <div class="retro-card">
-        <b>Vectores de Interrupción del Procesador 6502:</b>
-        &nbsp;&nbsp;• <code>NMI ($FFFA)</code>: <b>${nmi_vec:04X}</b>
-        &nbsp;&nbsp;• <code>RESET ($FFFC)</code>: <b>${rst_vec:04X}</b>
-        &nbsp;&nbsp;• <code>IRQ/BRK ($FFFE)</code>: <b>${irq_vec:04X}</b>
-    </div>
-    """, unsafe_allow_html=True)
+        prg_b, chr_b, f6, f7 = hdr[4], hdr[5], hdr[6], hdr[7]
+        mapper = (f7 & 0xF0) | (f6 >> 4)
+        mirror = "Vertical" if (f6 & 1) else "Horizontal"
 
-    d_c1, d_c2, d_c3 = st.columns(3)
-    num_prg_banks = max(1, len(prg) // 16384)
-    with d_c1:
-        prg_bank_sel = st.selectbox("Banco PRG (16 KB):", range(num_prg_banks), index=num_prg_banks - 1)
-    with d_c2:
-        default_ofs = (rst_vec & 0x3FFF) if (rst_vec >= 0x8000 and prg_bank_sel == num_prg_banks - 1) else 0
-        start_hex = st.text_input("Offset Inicial dentro del Banco (Hex $0000..$3FFF):", f"{default_ofs:04X}")
-    with d_c3:
-        num_ins = st.slider("Instrucciones a desensamblar:", 15, 120, 45)
+        nmi_v = prg[-6] | (prg[-5] << 8) if len(prg) >= 6 else 0
+        rst_v = prg[-4] | (prg[-3] << 8) if len(prg) >= 6 else 0
+        irq_v = prg[-2] | (prg[-1] << 8) if len(prg) >= 6 else 0
 
-    try:
-        ofs_val = max(0, min(0x3FFF, int(start_hex.replace("$", "").strip(), 16)))
-    except ValueError:
-        ofs_val = 0
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Mapper", f"#{mapper}", MAPPER_NAMES.get(mapper, "Especial"))
+        m2.metric("Código PRG-ROM", f"{prg_b * 16} KB ({prg_b} bancos)")
+        m3.metric("Gráficos CHR", f"{chr_b * 8} KB" if chr_b > 0 else "CHR-RAM")
+        m4.metric("Mirroring", mirror)
 
-    asm_dump = disassemble_6502(prg, prg_bank_sel, ofs_val, num_ins)
-    st.markdown(f'<div class="code-box">{asm_dump}</div>', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="studio-card">
+            <b>Vectores de Arranque e Interrupción del Procesador 6502:</b><br>
+            • <b>Vector RESET ($FFFC):</b> <code>${rst_v:04X}</code> (Punto donde inicia el programa al encender la consola)<br>
+            • <b>Vector NMI ($FFFA):</b> <code>${nmi_v:04X}</code> (Interrupción de refresco de pantalla a 60 Hz)<br>
+            • <b>Vector IRQ ($FFFE):</b> <code>${irq_v:04X}</code> (Interrupción de audio/mapper)
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.subheader("⚙️ Desensamblador 6502 en Vivo")
+        num_p_banks = max(1, len(prg) // 16384)
+        dc1, dc2, dc3 = st.columns(3)
+        with dc1:
+            b_sel = st.selectbox("Banco PRG:", range(num_p_banks), index=num_p_banks - 1)
+        with dc2:
+            jump_vec = st.selectbox("Saltar a dirección:", [
+                ("Inicio del vector RESET", rst_v & 0x3FFF),
+                ("Inicio del vector NMI", nmi_v & 0x3FFF),
+                ("Inicio del Banco ($0000)", 0x0000),
+            ], format_func=lambda x: f"{x[0]} (+${x[1]:04X})")
+        with dc3:
+            n_lines = st.slider("Líneas de código a mostrar:", 20, 120, 45)
+
+        st.markdown(f'<div class="asm-viewer">{disassemble_6502(prg, b_sel, jump_vec[1], n_lines)}</div>', unsafe_allow_html=True)
+
+    if st.session_state.has_asm:
+        st.subheader(f"📄 Tablas de Datos Detectadas en `{st.session_state.asm_name}`")
+        if st.session_state.asm_tables:
+            sel_t = st.selectbox("Inspeccionar / Editar tabla `.byte`:", list(st.session_state.asm_tables.keys()))
+            vals = st.session_state.asm_tables[sel_t]
+            raw_s = st.text_area(f"Bytes de `{sel_t}` ({len(vals)} elementos):", ", ".join(str(v) for v in vals), height=110)
+            if st.button(f"✔ Guardar cambios en tabla `{sel_t}`"):
+                nums = [int(x) for x in re.findall(r"\d+", raw_s)]
+                if nums:
+                    st.session_state.asm_tables[sel_t] = nums
+                    st.success(f"Tabla `{sel_t}` actualizada.")
