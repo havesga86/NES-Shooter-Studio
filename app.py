@@ -221,15 +221,11 @@ def init_state():
 # EXTRACTOR DE GRÁFICOS CHR-RAM Y DESCOMPRESOR KONAMI RLE (EJ. CASTLEVANIA)
 # =============================================================================
 def extract_chr_ram_from_prg(prg: bytearray) -> tuple[bytearray, str]:
-    extracted = bytearray()
-
-    # 1. Intentar descomprimir bloques Konami RLE (usado en Castlevania, Contra, Life Force, etc.)
-    # Buscar secuencias típicas de cabeceras o punteros a bloques RLE válidos que produzcan múltiplos de 16 bytes
-    i = 0
     n = len(prg)
     rle_chunks = bytearray()
+    i = 0
+
     while i < n - 32 and len(rle_chunks) < 65536:
-        # Probar descompresión Konami RLE desde i si parece cabecera de tiles
         out = bytearray()
         pos = i
         valid = True
@@ -241,7 +237,7 @@ def extract_chr_ram_from_prg(prg: bytearray) -> tuple[bytearray, str]:
             if cmd == 0xFF:
                 break
             elif cmd & 0x80:
-                cnt = (cmd & 0x7F)
+                cnt = cmd & 0x7F
                 if pos >= n or cnt == 0:
                     valid = False
                     break
@@ -255,36 +251,29 @@ def extract_chr_ram_from_prg(prg: bytearray) -> tuple[bytearray, str]:
                 out.extend(prg[pos:pos + cnt])
                 pos += cnt
 
-        if valid and len(out) >= 512 and (len(out) % 16 == 0) and pos < n and prg[pos - 1] == 0xFF:
-            # Verificar que no sea todo ceros o 0xFF
+        if valid and len(out) >= 512 and (len(out) % 16 == 0) and pos <= n and prg[pos - 1] == 0xFF:
             non_trivial = sum(1 for b in out if b not in (0x00, 0xFF))
             if non_trivial > len(out) // 6:
                 rle_chunks.extend(out)
                 i = pos
                 continue
-        i += 16
+        i += 32
 
     if len(rle_chunks) >= 4096:
         pad = (8192 - (len(rle_chunks) % 8192)) % 8192
         rle_chunks.extend(b"\x00" * pad)
-        return rle_chunks, f"CHR-RAM Descomprimido (Konami RLE + PRG: {len(rle_chunks)//1024} KB)"
+        return rle_chunks, f"CHR-RAM Descomprimido (Konami RLE + PRG: {len(rle_chunks)//8192} bancos de 8KB)"
 
-    # 2. Extraer bloques de tiles no comprimidos (fuentes 1bpp/2bpp y sprites crudos dentro de PRG-ROM)
+    extracted = bytearray()
     for b_ofs in range(0, len(prg), 8192):
         chunk = prg[b_ofs:b_ofs + 8192]
-        # Evaluar densidad de patrones tipo tile 2bpp
-        score = sum(1 for j in range(0, len(chunk) - 16, 16) if chunk[j:j+8] != b"\x00"*8 and chunk[j:j+8] != b"\xff"*8)
-        if score > 60:
+        if len(chunk) == 8192:
             extracted.extend(chunk)
-
-    if len(extracted) >= 8192:
-        return extracted[:65536], f"CHR-RAM Extraído de Bancos PRG ({len(extracted)//8192} bancos)"
-
-    return bytearray(prg[:min(len(prg), 32768)]), "CHR-RAM Mapeado desde PRG-ROM"
+    return extracted[:65536], f"CHR-RAM Mapeado desde Bancos PRG ({len(extracted)//8192} bancos)"
 
 
 # =============================================================================
-# ESCÁNER UNIVERSAL DE TEXTOS (SOPORTA PPU PRINT, ASCII Y TABLAS CODIFICADAS)
+# ESCÁNER UNIVERSAL DE TEXTOS (SOPORTA PPU PRINT, ASCII Y TABLAS DESPLAZADAS)
 # =============================================================================
 def extract_all_rom_texts(prg: bytearray):
     entries = []
@@ -325,7 +314,6 @@ def extract_all_rom_texts(prg: bytearray):
         if letters < 4:
             continue
         txt_full = raw.decode("ascii", errors="ignore")
-        # Excluir falsos positivos de código máquina con muchos símbolos raros
         weird = sum(1 for c in txt_full if c in "{}[]|~`^\\@$%&*+=<>?;:")
         if weird > len(txt_full) // 5:
             continue
@@ -348,74 +336,76 @@ def extract_all_rom_texts(prg: bytearray):
                 "ID": f"TXT_{len(entries):02d}",
                 "Tipo": "Cadena ASCII (.byte)",
                 "Direccion": ofs_to_addr_str(s),
-                "Texto": txt_full,
-                "Max_Chars": len(txt_full),
+                "Texto": txt_full[:64],
+                "Max_Chars": min(64, len(txt_full)),
                 "_offset": s,
                 "_mode": "raw",
                 "_shift": 0,
             })
         used_ranges.append((s, e))
 
-    # 3. Escáner de Textos con Codificación de Tabla NES (ej. Castlevania, Mega Man, Zelda, SMB)
-    # Busca bloques donde el carácter espacio se repite y las letras mantienen diferencias relativas de inglés/español
-    common_words = [b"THE ", b"YOU ", b"SCORE", b"STAGE", b"PLAYER", b"START", b"GAME", b"OVER", b"TIME", b"HEART", b"KONAMI", b"CASTLE", b"VAMPIRE", b"BELMONT", b"DRACULA"]
-    prg_arr = np.frombuffer(prg, dtype=np.uint8)
+    # 3. Escáner de Textos Codificados por Tabla (ej. Castlevania, Konami, Nintendo)
+    # Todas las palabras clave tienen al menos 5 letras para garantizar >= 4 diferencias
+    common_words = [
+        b"SCORE", b"STAGE", b"PLAYER", b"START", b"GAME ",
+        b"OVER ", b"KONAMI", b"CASTLE", b"VAMPIRE", b"PRODUCE",
+        b"DIRECT", b"THANK", b"PLAYING", b"HERO "
+    ]
+    prg_arr = np.frombuffer(prg, dtype=np.uint8).astype(np.int16)
+    diffs = np.diff(prg_arr)
+    n_diffs = len(diffs)
+
     for word in common_words:
         w_diffs = np.diff(np.frombuffer(word, dtype=np.uint8).astype(np.int16))
-        # Buscar coincidencia por diferencias relativas (independiente del offset de la fuente del juego)
-        for step in (1, 2):  # step=1: normal, step=2: pares como en ciertas tablas de texto
-            if step == 1:
-                diffs = np.diff(prg_arr.astype(np.int16))
-                matches = np.where(
-                    (diffs[:-3] == w_diffs[0]) &
-                    (diffs[1:-2] == w_diffs[1]) &
-                    (diffs[2:-1] == w_diffs[2]) &
-                    (diffs[3:] == w_diffs[3])
-                )[0]
-                for pos in matches[:15]:
-                    pos = int(pos)
-                    if any(us <= pos < ue for us, ue in used_ranges):
-                        continue
-                    shift = int(prg[pos]) - word[0]
-                    if shift == 0:
-                        continue
-                    # Expandir hacia atrás y adelante mientras sean caracteres válidos con ese desplazamiento
-                    start_p = pos
-                    while start_p > 0 and 32 <= (prg[start_p - 1] - shift) <= 90:
-                        start_p -= 1
-                    end_p = pos + len(word)
-                    while end_p < len(prg) and 32 <= (prg[end_p] - shift) <= 90:
-                        end_p += 1
-                    if end_p - start_p >= 5:
-                        decoded = "".join(chr(max(32, min(126, b - shift))) for b in prg[start_p:end_p])
-                        entries.append({
-                            "ID": f"TBL_{len(entries):02d}",
-                            "Tipo": f"Texto Codificado (Shift {shift:+d})",
-                            "Direccion": ofs_to_addr_str(start_p),
-                            "Texto": decoded,
-                            "Max_Chars": end_p - start_p,
-                            "_offset": start_p,
-                            "_mode": "shifted",
-                            "_shift": shift,
-                        })
-                        used_ranges.append((start_p, end_p))
+        k = len(w_diffs)
+        if k < 4 or n_diffs < k:
+            continue
+
+        cond = np.ones(n_diffs - k + 1, dtype=bool)
+        for j in range(k):
+            cond &= (diffs[j:n_diffs - k + 1 + j] == w_diffs[j])
+
+        matches = np.where(cond)[0]
+        for pos in matches[:10]:
+            pos = int(pos)
+            if any(us <= pos < ue for us, ue in used_ranges):
+                continue
+            shift = int(prg[pos]) - word[0]
+            if shift == 0:
+                continue
+
+            start_p = pos
+            while start_p > 0 and 32 <= (int(prg[start_p - 1]) - shift) <= 122 and (pos - start_p) < 40:
+                start_p -= 1
+            end_p = pos + len(word)
+            while end_p < len(prg) and 32 <= (int(prg[end_p]) - shift) <= 122 and (end_p - start_p) < 64:
+                end_p += 1
+
+            if end_p - start_p >= 5:
+                decoded = "".join(chr(max(32, min(126, int(b) - shift))) for b in prg[start_p:end_p])
+                entries.append({
+                    "ID": f"TBL_{len(entries):02d}",
+                    "Tipo": f"Tabla NES (Shift {shift:+d})",
+                    "Direccion": ofs_to_addr_str(start_p),
+                    "Texto": decoded,
+                    "Max_Chars": end_p - start_p,
+                    "_offset": start_p,
+                    "_mode": "shifted",
+                    "_shift": shift,
+                })
+                used_ranges.append((start_p, end_p))
 
     return entries[:120]
 
 
 # =============================================================================
-# ESCÁNER UNIVERSAL DE MÚSICA Y CANCIONES CHIPTUNE EN ROM (.NES)
-# Funciona con:
-# 1. shooterv1.13.nes (Italo-Disco, Historia, Selección de Nave, Game Over, Konami Jingle)
-# 2. shooter.nes original (Jingle Konami en $CAD5 y efectos APU)
-# 3. Juegos comerciales Konami / Capcom / Nintendo (Castlevania, etc.) vía Tablas de Punteros Musicales
+# ESCÁNER UNIVERSAL DE CANCIONES CHIPTUNE EN ROM (.NES)
 # =============================================================================
 def extract_all_rom_songs(prg: bytearray):
     songs = {}
     num_banks = max(1, len(prg) // 16384)
-    cpu_base = 0xC000 if num_banks == 1 else 0x8000
 
-    # --- A. DETECTOR PARA SHOOTER V1.13 / HOMEBREW CON MOTOR DE 4 CANALES ---
+    # 1. Detector para SHOOTER v1.13 / Homebrew con tabla de notas de 24 elementos
     for m in re.finditer(rb"[\xBD\xB9](..)\x8D[\x02\x06\x0A]\x40", bytes(prg), re.DOTALL):
         addr = m.group(1)[0] | (m.group(1)[1] << 8)
         ofs = addr - (0xC000 if len(prg) == 16384 else 0x8000)
@@ -424,7 +414,6 @@ def extract_all_rom_songs(prg: bytearray):
             st.session_state.note_hi = list(prg[ofs + 24:ofs + 48])
             p_end = ofs + 48
 
-            # Verificar si tiene song_order (36 bytes) + bgm_mel (256 bytes)
             if p_end + 36 + 768 + 16 <= len(prg):
                 s_order = list(prg[p_end:p_end + 36])
                 if all(0 <= x <= 15 for x in s_order) and len(set(s_order)) >= 4:
@@ -473,14 +462,14 @@ def extract_all_rom_songs(prg: bytearray):
                         }
             break
 
-    # --- B. DETECTOR DE JINGLES DIRECTOS (SOPORTA SHOOTER.NES ORIGINAL Y V1.13) ---
+    # 2. Detector de Jingles directos en $4002 (funciona con shooter.nes original y shooterv1.13.nes)
     for m in re.finditer(rb"\xBD(..)\x8D\x02\x40", bytes(prg), re.DOTALL):
         j_addr = m.group(1)[0] | (m.group(1)[1] << 8)
         j_ofs = j_addr - (0xC000 if len(prg) == 16384 else 0x8000)
         if 0 <= j_ofs <= len(prg) - 6:
             periods = list(prg[j_ofs:j_ofs + 6])
-            if all(0x20 <= p <= 0xF0 for p in periods):
-                songs[f"Jingle Código Konami / Pausa (${j_addr:04X})"] = {
+            if all(0x20 <= p <= 0xF5 for p in periods):
+                songs[f"Jingle Código Secreto / Pausa (${j_addr:04X})"] = {
                     "tempo": 6,
                     "raw_periods": periods,
                     "mel": [8, 11, 13, 16, 18, 20],
@@ -491,44 +480,34 @@ def extract_all_rom_songs(prg: bytearray):
                 }
                 break
 
-    # --- C. DETECTOR UNIVERSAL PARA ROMS COMERCIALES (CASTLEVANIA / KONAMI / NINTENDO) ---
+    # 3. Detector Universal para ROMs comerciales (Castlevania, Konami, Capcom, Nintendo)
     if not songs:
-        # Buscar en cada banco PRG tablas de punteros musicales (secuencias de direcciones $8000-$BFFF)
-        # que apunten a flujos de bytes de notas y duraciones
         for b_idx in range(num_banks):
             b_start = b_idx * 16384
             bank = prg[b_start:b_start + 16384]
-
-            # Escanear tablas de punteros de canciones (grupos de al menos 6 punteros consecutivos dentro de $8000..$BFFF)
-            ptr_Pos = 0
-            while ptr_Pos < len(bank) - 32 and len(songs) < 16:
-                ptrs = [bank[ptr_Pos + k * 2] | (bank[ptr_Pos + k * 2 + 1] << 8) for k in range(8)]
+            ptr_pos = 0
+            while ptr_pos < len(bank) - 32 and len(songs) < 16:
+                ptrs = [bank[ptr_pos + k * 2] | (bank[ptr_pos + k * 2 + 1] << 8) for k in range(8)]
                 if all(0x8000 <= p <= 0xBFFF for p in ptrs) and len(set(ptrs)) >= 5:
-                    # Verificar si los destinos contienen secuencias de comandos/notas musicales
                     valid_streams = 0
                     for p in ptrs[:6]:
                         rel = p - 0x8000
                         if 0 <= rel < len(bank) - 32:
                             stream = bank[rel:rel + 32]
-                            # En motores comerciales (como Konami en Castlevania), fin de pista o salto es $FF/$FE
                             if any(0x10 <= x <= 0x7F for x in stream):
                                 valid_streams += 1
                     if valid_streams >= 5:
-                        # Extraer hasta 12 canciones desde esta tabla de punteros
-                        for s_i in range(12):
-                            if ptr_Pos + s_i * 2 + 2 > len(bank):
+                        for s_i in range(14):
+                            if ptr_pos + s_i * 2 + 2 > len(bank) or len(songs) >= 16:
                                 break
-                            p_val = bank[ptr_Pos + s_i * 2] | (bank[ptr_Pos + s_i * 2 + 1] << 8)
+                            p_val = bank[ptr_pos + s_i * 2] | (bank[ptr_pos + s_i * 2 + 1] << 8)
                             if not (0x8000 <= p_val <= 0xBFFF):
                                 break
                             rel = p_val - 0x8000
                             if 0 <= rel < len(bank) - 48:
                                 raw_stm = bank[rel:rel + 64]
-                                # Convertir flujo de notas del motor comercial a pasos reproducibles (1..23)
-                                mel_steps = []
-                                harm_steps = []
-                                bass_steps = []
-                                for idx_b, b_val in enumerate(raw_stm):
+                                mel_steps, harm_steps, bass_steps = [], [], []
+                                for b_val in raw_stm:
                                     if b_val == 0xFF:
                                         break
                                     if b_val < 0x80:
@@ -549,9 +528,9 @@ def extract_all_rom_songs(prg: bytearray):
                                         "drum": [1, 0, 3, 0, 2, 0, 3, 0, 1, 0, 3, 0, 2, 0, 3, 3],
                                         "offsets": {},
                                     }
-                        ptr_Pos += 32
+                        ptr_pos += 32
                         continue
-                ptr_Pos += 2
+                ptr_pos += 2
 
     return songs
 
@@ -586,7 +565,6 @@ def analyze_nes_file(data: bytearray, filename: str):
         st.session_state.chr_data = chr_extracted
         st.session_state.chr_source_info = info_str
 
-    # Extraer paleta desde PRG-ROM
     for i in range(len(prg) - 32):
         if prg[i] == 0x0F and prg[i + 4] == 0x0F and prg[i + 8] == 0x0F and prg[i + 12] == 0x0F:
             cand = list(prg[i:i + 32])
@@ -685,7 +663,7 @@ def analyze_asm_file(text: str, filename: str):
 
 
 # =============================================================================
-# RENDERIZADO ULTRARRÁPIDO VECTORIZADO CON NUMPY (CERO LAG EN EL NAVEGADOR)
+# RENDERIZADO ULTRARRÁPIDO VECTORIZADO CON NUMPY
 # =============================================================================
 def get_tile_matrix(bank_idx: int, table_idx: int, tile_id: int):
     offset = (bank_idx * 8192) + (table_idx * 4096) + (tile_id * 16)
@@ -718,7 +696,7 @@ def render_chr_sheet_fast(bank_idx: int, table_idx: int, pal_group: int, selecte
 
     raw = np.frombuffer(chunk, dtype=np.uint8).reshape(256, 2, 8)
     bits = np.unpackbits(raw, axis=2).reshape(256, 2, 8, 8)
-    pixels = bits[:, 0, :, :] | (bits[:, 1, :, :] << 1)  # (256, 8, 8)
+    pixels = bits[:, 0, :, :] | (bits[:, 1, :, :] << 1)
     grid = pixels.reshape(16, 16, 8, 8).transpose(0, 2, 1, 3).reshape(128, 128)
 
     sub_pal = np.array([NES_MASTER_PALETTE[st.session_state.palette[pal_group * 4 + c] & 0x3F] for c in range(4)], dtype=np.uint8)
@@ -747,7 +725,7 @@ def render_metasprite(bank_idx: int, table_idx: int, tl: int, tr: int, bl: int, 
 
 
 # =============================================================================
-# SINTETIZADOR 2A03 ULTRARRÁPIDO CON NUMPY (PRECISIÓN DE HARDWARE NES)
+# SINTETIZADOR 2A03 ULTRARRÁPIDO CON NUMPY
 # =============================================================================
 def synthesize_song_wav_fast(song_dict: dict) -> bytes:
     sample_rate = 22050
@@ -757,7 +735,6 @@ def synthesize_song_wav_fast(song_dict: dict) -> bytes:
     n_lo = st.session_state.note_lo
     n_hi = st.session_state.note_hi
 
-    # Caso especial: Jingle por periodos directos en $4002 (como en shooter.nes original)
     if "raw_periods" in song_dict:
         periods = song_dict["raw_periods"]
         chunks = []
@@ -796,18 +773,15 @@ def synthesize_song_wav_fast(song_dict: dict) -> bytes:
         period = (n_hi[n_idx] << 8) | n_lo[n_idx]
         if period <= 0:
             return 0.0
-        # En la APU 2A03 real: Pulse = CPU / (16 * (P + 1)), Triangle = CPU / (32 * (P + 1))
         div = 32.0 if is_triangle else 16.0
         return 1789773.0 / (div * (period + 1))
 
     t = np.arange(samples_per_step, dtype=np.float32) / sample_rate
     env = np.maximum(0.30, 1.0 - (np.arange(samples_per_step, dtype=np.float32) / samples_per_step) * 0.60)
-    # En shooterv1.13.nes, a mitad del paso (frame 3 de 6) el volumen de la melodía baja de $7D a $79
     half_idx = samples_per_step // 2
     step_env_mel = np.ones(samples_per_step, dtype=np.float32)
     step_env_mel[half_idx:] = 0.68
 
-    # Pre-generar sonidos de batería con NumPy
     kick_len = min(samples_per_step, int(sample_rate * 0.045))
     snare_len = min(samples_per_step, int(sample_rate * 0.045))
     hat_len = min(samples_per_step, int(sample_rate * 0.020))
@@ -823,8 +797,6 @@ def synthesize_song_wav_fast(song_dict: dict) -> bytes:
 
         sig = np.zeros(samples_per_step, dtype=np.float32)
 
-        # Emulación exacta de bgm_tick en shooterv1.13.nes:
-        # Si cur_mel > 0 suena en Pulso 1; si cur_mel == 0, Pulso 1 toca bgm_harm (@p1_harm)
         if m_note > 0:
             f1 = note_freq(m_note, False)
             sig += np.where((t * f1) % 1.0 < 0.25, 0.24, -0.24) * step_env_mel
@@ -835,22 +807,20 @@ def synthesize_song_wav_fast(song_dict: dict) -> bytes:
             fh = note_freq(h_note, False)
             sig += np.where((t * fh) % 1.0 < 0.50, 0.18, -0.18) * env
 
-        # Canal Triángulo (Bajo)
         if b_note > 0:
             ft = note_freq(b_note, True)
             ph = (t * ft) % 1.0
             tri = np.where(ph < 0.5, 4.0 * ph - 1.0, 3.0 - 4.0 * ph)
             sig += tri * 0.30
 
-        # Canal Ruido + DMC (Batería)
-        if d_hit == 1:  # Bombo (DUM)
+        if d_hit == 1:
             kt = t[:kick_len]
             k_env = np.linspace(1.0, 0.0, kick_len, dtype=np.float32)
             sig[:kick_len] += np.sin(2.0 * np.pi * (115.0 - kt * 1200.0) * kt) * 0.38 * k_env
-        elif d_hit == 2:  # Caja (CLAP)
+        elif d_hit == 2:
             s_env = np.linspace(1.0, 0.0, snare_len, dtype=np.float32)
             sig[:snare_len] += noise_arr[:snare_len] * 0.24 * s_env
-        elif d_hit == 3:  # Platillo (TS)
+        elif d_hit == 3:
             h_env = np.linspace(1.0, 0.0, hat_len, dtype=np.float32)
             sig[:hat_len] += noise_arr[:hat_len] * 0.14 * h_env
 
@@ -1158,7 +1128,7 @@ with tab_mus:
                 st.rerun()
 
 # =============================================================================
-# PESTAÑA 2: EDITOR UNIVERSAL DE TEXTOS (SOPORTA PPU, ASCII Y SHIFTED TABLES)
+# PESTAÑA 2: EDITOR UNIVERSAL DE TEXTOS
 # =============================================================================
 with tab_txt:
     if st.session_state.has_nes:
