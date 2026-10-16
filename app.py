@@ -7,7 +7,7 @@ import streamlit as st
 from PIL import Image, ImageDraw
 
 # =============================================================================
-# CONFIGURACIÓN DE PÁGINA Y CSS DE ALTO CONTRASTE (ANTI-MODO OSCURO ROTO)
+# CONFIGURACIÓN DE PÁGINA Y CSS DE ALTO CONTRASTE (LEGIBLE EN CUALQUIER TEMA)
 # =============================================================================
 st.set_page_config(
     page_title="NES Shooter Studio",
@@ -18,22 +18,10 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    /* Forzar tema claro de alto contraste legible en cualquier navegador */
-    .stApp {
-        background-color: #f1f5f9 !important;
-        color: #0f172a !important;
-    }
-    section[data-testid="stSidebar"] {
-        background-color: #ffffff !important;
-        border-right: 2px solid #cbd5e1 !important;
-    }
-    section[data-testid="stSidebar"] * {
-        color: #0f172a !important;
-    }
-    h1, h2, h3, h4, p, label, span, div {
-        color: #0f172a;
-    }
-    /* Tarjetas limpias */
+    .stApp { background-color: #f8fafc !important; color: #0f172a !important; }
+    section[data-testid="stSidebar"] { background-color: #ffffff !important; border-right: 2px solid #cbd5e1 !important; }
+    section[data-testid="stSidebar"] * { color: #0f172a !important; }
+    h1, h2, h3, h4, p, label, span, div { color: #0f172a; }
     .studio-card {
         background-color: #ffffff !important;
         border: 1px solid #cbd5e1 !important;
@@ -41,12 +29,11 @@ st.markdown("""
         border-radius: 8px;
         padding: 16px;
         margin-bottom: 16px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     }
-    /* Pestañas bien legibles */
     button[data-baseweb="tab"] {
         background-color: #e2e8f0 !important;
-        color: #1e293b !important;
+        color: #0f172a !important;
         font-weight: 700 !important;
         border-radius: 6px 6px 0 0 !important;
         margin-right: 4px !important;
@@ -56,13 +43,14 @@ st.markdown("""
         background-color: #2563eb !important;
         color: #ffffff !important;
     }
-    /* Inputs, Selectboxes y Textareas siempre con fondo blanco y letra negra */
+    button[data-baseweb="tab"][aria-selected="true"] * {
+        color: #ffffff !important;
+    }
     input, textarea, select, [data-baseweb="select"] > div {
         background-color: #ffffff !important;
         color: #0f172a !important;
         border: 1px solid #94a3b8 !important;
     }
-    /* Botones de acción */
     .stButton > button, .stDownloadButton > button {
         background-color: #2563eb !important;
         color: #ffffff !important;
@@ -70,11 +58,12 @@ st.markdown("""
         border: none !important;
         border-radius: 6px !important;
     }
-    .stButton > button:hover, .stDownloadButton > button:hover {
-        background-color: #1d4ed8 !important;
+    .stButton > button *, .stDownloadButton > button * {
         color: #ffffff !important;
     }
-    /* Visor de código y desensamblador */
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        background-color: #1d4ed8 !important;
+    }
     .asm-viewer {
         background-color: #0f172a !important;
         color: #38bdf8 !important;
@@ -101,7 +90,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# CONSTANTES DE HARDWARE NES (PALETA 2C02, MAPPERS, OPCODES 6502 Y NOTAS 2A03)
+# CONSTANTES DE HARDWARE NES (PALETA 2C02, MAPPERS, OPCODES 6502)
 # =============================================================================
 NES_MASTER_PALETTE = [
     (84, 84, 84), (0, 30, 116), (8, 16, 144), (48, 0, 136),
@@ -196,7 +185,7 @@ def rgb_hex(rgb):
 
 
 # =============================================================================
-# INICIALIZACIÓN DEL ESTADO (VACÍO HASTA QUE EL USUARIO SUBA UN ARCHIVO)
+# ESTADO INICIAL DE LA SESIÓN
 # =============================================================================
 def init_state():
     if "initialized" in st.session_state:
@@ -212,12 +201,13 @@ def init_state():
     st.session_state.prg_data = bytearray()
     st.session_state.chr_data = bytearray()
     st.session_state.palette = [
-        0x0F, 0x00, 0x10, 0x30, 0x0F, 0x01, 0x11, 0x21,
-        0x0F, 0x16, 0x27, 0x38, 0x0F, 0x09, 0x19, 0x29,
-        0x0F, 0x2C, 0x38, 0x11, 0x0F, 0x16, 0x27, 0x30,
-        0x0F, 0x2A, 0x38, 0x30, 0x0F, 0x14, 0x24, 0x38
+        0x0F, 0x00, 0x0C, 0x18, 0x0F, 0x01, 0x02, 0x12,
+        0x0F, 0x16, 0x27, 0x38, 0x0F, 0x30, 0x00, 0x10,
+        0x0F, 0x2C, 0x38, 0x11, 0x0F, 0x0C, 0x24, 0x38,
+        0x0F, 0x2A, 0x38, 0x30, 0x0F, 0x30, 0x16, 0x27
     ]
 
+    st.session_state.rom_texts = []
     st.session_state.asm_strings = []
     st.session_state.asm_tables = {}
     st.session_state.songs = {}
@@ -226,7 +216,202 @@ def init_state():
 
 
 # =============================================================================
-# ANALIZADORES AUTOMÁTICOS AL SUBIR ARCHIVO .NES O .S
+# ESCÁNER PROFUNDO DE TEXTOS EN ROM (.NES)
+# Detecta tanto cadenas .byte continuas como macros PRINT (LDA #c / STA $2007)
+# =============================================================================
+def extract_all_rom_texts(prg: bytearray):
+    entries = []
+    used_ranges = []
+
+    # 1. Detectar macros PPU_PRINT: secuencias de (A9 XX 8D 07 20){2,}
+    ppu_pattern = re.compile(rb"(?:\xA9[\x20-\x7E]\x8D\x07\x20){2,}")
+    for m in ppu_pattern.finditer(bytes(prg)):
+        raw = m.group(0)
+        chars = [chr(raw[i + 1]) for i in range(0, len(raw), 5)]
+        txt = "".join(chars)
+        start = m.start()
+        cpu_addr = 0xC000 + (start & 0x3FFF) if len(prg) == 16384 else 0x8000 + (start & 0x7FFF)
+        entries.append({
+            "ID": f"PPU_PRINT_${cpu_addr:04X}",
+            "Tipo": "Macro PRINT (PPU $2007)",
+            "Direccion": f"${cpu_addr:04X}",
+            "Texto": txt,
+            "Max_Chars": len(txt),
+            "_offset": start,
+            "_mode": "ppu"
+        })
+        used_ranges.append((start, m.end()))
+
+    # 2. Detectar tablas de punteros de texto (ej. story_lo / story_hi o bloques de líneas fijas)
+    # y cadenas ASCII continuas en RODATA
+    ascii_pattern = re.compile(rb"[\x20-\x7E]{5,}")
+    for m in ascii_pattern.finditer(bytes(prg)):
+        s, e = m.start(), m.end()
+        if any(not (e <= u_s or s >= u_e) for u_s, u_e in used_ranges):
+            continue
+        raw_bytes = m.group(0)
+        # Filtrar secuencias de código máquina azarosas exigiendo al menos 3 letras reales
+        letters = sum(1 for b in raw_bytes if (65 <= b <= 90) or (97 <= b <= 122))
+        if letters < 3:
+            continue
+
+        txt_full = raw_bytes.decode("ascii", errors="ignore")
+        # Si es un bloque grande de líneas de 26 caracteres (como la historia de 15 líneas = 390 bytes),
+        # dividirlo automáticamente en líneas individuales de 26 caracteres para que sea fácil de leer y editar
+        if len(txt_full) >= 52 and len(txt_full) % 26 == 0:
+            num_l = len(txt_full) // 26
+            for idx_l in range(num_l):
+                sub_ofs = s + idx_l * 26
+                cpu_addr = 0xC000 + (sub_ofs & 0x3FFF) if len(prg) == 16384 else 0x8000 + (sub_ofs & 0x7FFF)
+                line_s = txt_full[idx_l * 26:(idx_l + 1) * 26]
+                entries.append({
+                    "ID": f"HISTORIA_L{idx_l:02d}",
+                    "Tipo": "Línea de Historia (26 cols)",
+                    "Direccion": f"${cpu_addr:04X}",
+                    "Texto": line_s,
+                    "Max_Chars": 26,
+                    "_offset": sub_ofs,
+                    "_mode": "raw"
+                })
+        else:
+            cpu_addr = 0xC000 + (s & 0x3FFF) if len(prg) == 16384 else 0x8000 + (s & 0x7FFF)
+            entries.append({
+                "ID": f"CADENA_${cpu_addr:04X}",
+                "Tipo": "Cadena RODATA (.byte)",
+                "Direccion": f"${cpu_addr:04X}",
+                "Texto": txt_full,
+                "Max_Chars": len(txt_full),
+                "_offset": s,
+                "_mode": "raw"
+            })
+
+    return entries
+
+
+# =============================================================================
+# ESCÁNER PROFUNDO DE CANCIONES CHIPTUNE EN ROM (.NES)
+# Rastrea las instrucciones que alimentan la APU 2A03 ($4000-$400F) y tablas de notas
+# =============================================================================
+def extract_all_rom_songs(prg: bytearray):
+    songs = {}
+    cpu_base = 0xC000 if len(prg) == 16384 else 0x8000
+
+    # 1. Buscar tabla de periodos de notas (note_lo / note_hi)
+    # En código 6502 se leen como: LDA note_lo,X/Y (BD/B9 lo hi) -> STA $4002/$4006/$400A (8D 02/06/0A 40)
+    note_lo_addr = None
+    note_hi_addr = None
+    for m in re.finditer(rb"[\xBD\xB9](..)\x8D[\x02\x06\x0A]\x40", bytes(prg), re.DOTALL):
+        addr = m.group(1)[0] | (m.group(1)[1] << 8)
+        ofs = addr - cpu_base
+        if 0 <= ofs <= len(prg) - 24 and prg[ofs] == 0x00:
+            note_lo_addr = ofs
+            if ofs + 48 <= len(prg):
+                note_hi_addr = ofs + 24
+            break
+
+    if note_lo_addr is not None:
+        st.session_state.note_lo = list(prg[note_lo_addr:note_lo_addr + 24])
+        st.session_state.note_hi = list(prg[note_hi_addr:note_hi_addr + 24])
+        p_end = note_hi_addr + 24
+
+        # Verificar si después de note_hi sigue la estructura de canciones de SHOOTER / Homebrew
+        # (song_order[36], bgm_mel[256], bgm_harm[256], bgm_bass[256], bgm_drum[16], susp[112], sel[112], go[8])
+        if p_end + 36 + 256 * 3 + 16 <= len(prg):
+            song_order = list(prg[p_end:p_end + 36])
+            if all(0 <= x <= 15 for x in song_order) and len(set(song_order)) >= 4:
+                b_mel = p_end + 36
+                b_harm = b_mel + 256
+                b_bass = b_harm + 256
+                b_drum = b_bass + 256
+
+                songs["1. Tema Principal (Italo-Disco - 16 Patrones)"] = {
+                    "tempo": 6,
+                    "song_order": song_order,
+                    "mel": list(prg[b_mel:b_mel + 256]),
+                    "harm": list(prg[b_harm:b_harm + 256]),
+                    "bass": list(prg[b_bass:b_bass + 256]),
+                    "drum": list(prg[b_drum:b_drum + 16]),
+                    "offsets": {"mel": b_mel, "harm": b_harm, "bass": b_bass, "drum": b_drum, "order": p_end}
+                }
+
+                s_ofs = b_drum + 16
+                if s_ofs + 112 <= len(prg):
+                    songs["2. Tema de Historia (10s Synth-Pop)"] = {
+                        "tempo": 12,
+                        "mel": list(prg[s_ofs:s_ofs + 32]),
+                        "harm": list(prg[s_ofs + 32:s_ofs + 64]),
+                        "bass": list(prg[s_ofs + 64:s_ofs + 96]),
+                        "drum": list(prg[s_ofs + 96:s_ofs + 112]),
+                        "offsets": {"mel": s_ofs, "harm": s_ofs + 32, "bass": s_ofs + 64, "drum": s_ofs + 96}
+                    }
+
+                sel_ofs = s_ofs + 112
+                if sel_ofs + 112 <= len(prg):
+                    songs["3. Tema Selección de Nave (Synth Animado)"] = {
+                        "tempo": 7,
+                        "mel": list(prg[sel_ofs:sel_ofs + 32]),
+                        "harm": list(prg[sel_ofs + 32:sel_ofs + 64]),
+                        "bass": list(prg[sel_ofs + 64:sel_ofs + 96]),
+                        "drum": list(prg[sel_ofs + 96:sel_ofs + 112]),
+                        "offsets": {"mel": sel_ofs, "harm": sel_ofs + 32, "bass": sel_ofs + 64, "drum": sel_ofs + 96}
+                    }
+
+                go_ofs = sel_ofs + 112
+                if go_ofs + 8 <= len(prg):
+                    go_arr = list(prg[go_ofs:go_ofs + 8])
+                    if all(0 <= x <= 23 for x in go_arr):
+                        songs["4. Tonada de Game Over"] = {
+                            "tempo": 10,
+                            "mel": go_arr,
+                            "harm": [0] * 8,
+                            "bass": list(go_arr),
+                            "drum": [0] * 8,
+                            "offsets": {"mel": go_ofs}
+                        }
+
+    # 2. Detectar Jingles directos (LDA jng_notes,X -> STA $4002) en cualquier parte de la ROM
+    for m in re.finditer(rb"\xBD(..)\x8D\x02\x40", bytes(prg), re.DOTALL):
+        j_addr = m.group(1)[0] | (m.group(1)[1] << 8)
+        j_ofs = j_addr - cpu_base
+        if 0 <= j_ofs <= len(prg) - 6 and j_ofs != note_lo_addr:
+            raw_periods = list(prg[j_ofs:j_ofs + 6])
+            songs[f"5. Jingle Código Secreto / Pausa (${j_addr:04X})"] = {
+                "tempo": 5,
+                "raw_periods": raw_periods,
+                "mel": [13, 16, 18, 19, 21, 23],
+                "harm": [0] * 6,
+                "bass": [0] * 6,
+                "drum": [0] * 6,
+                "offsets": {}
+            }
+            break
+
+    # 3. Fallback universal para otras ROMs de NES: buscar tablas indexadas antes de escrituras a $4000-$400B
+    if not songs:
+        seen_tables = set()
+        for m in re.finditer(rb"[\xBD\xB9](..)", bytes(prg)):
+            t_addr = m.group(1)[0] | (m.group(1)[1] << 8)
+            t_ofs = t_addr - cpu_base
+            if 0 <= t_ofs <= len(prg) - 32 and t_ofs not in seen_tables:
+                cand = list(prg[t_ofs:t_ofs + 32])
+                if all(0 <= x <= 23 for x in cand) and 6 <= len(set(cand)) <= 16 and cand.count(0) >= 2:
+                    seen_tables.add(t_ofs)
+                    songs[f"Secuencia Musical ROM (${t_addr:04X})"] = {
+                        "tempo": 7,
+                        "mel": cand,
+                        "harm": [0] * 32,
+                        "bass": [1 if i % 2 == 0 else 8 for i in range(32)],
+                        "drum": [1 if i % 4 == 0 else 3 for i in range(16)],
+                        "offsets": {"mel": t_ofs}
+                    }
+                    if len(songs) >= 10:
+                        break
+
+    return songs
+
+
+# =============================================================================
+# CARGADORES PRINCIPALES DE ARCHIVOS (.NES Y .S)
 # =============================================================================
 def analyze_nes_file(data: bytearray, filename: str):
     if len(data) < 16 or data[:4] != b"NES\x1a":
@@ -250,8 +435,8 @@ def analyze_nes_file(data: bytearray, filename: str):
     else:
         st.session_state.chr_data = bytearray(data[offset:offset + 8192]) if len(data) >= offset + 8192 else bytearray(8192)
 
-    # Buscar paletas en PRG-ROM (bloques de 16 o 32 bytes que inicien con $0F y valores <= $3F)
     prg = st.session_state.prg_data
+    # Extraer paleta real de la ROM
     for i in range(len(prg) - 32):
         if prg[i] == 0x0F and prg[i + 4] == 0x0F and prg[i + 8] == 0x0F and prg[i + 12] == 0x0F:
             cand = list(prg[i:i + 32])
@@ -259,54 +444,11 @@ def analyze_nes_file(data: bytearray, filename: str):
                 st.session_state.palette = cand
                 break
 
-    # Detectar canciones dentro del binario .nes si aún no hay canciones cargadas desde .s
-    if not st.session_state.songs:
-        detect_songs_in_rom(prg)
-
-
-def detect_songs_in_rom(prg: bytearray):
-    songs = {}
-    # 1. Buscar firma de la tabla de notas de SHOOTER o secuencias musicales en PRG-ROM
-    sig = bytes([0x00, 0xA6, 0x3A, 0xFB, 0xC4, 0xAB])
-    pos = prg.find(sig)
-    if pos != -1 and pos + 800 <= len(prg):
-        st.session_state.note_lo = list(prg[pos:pos + 24])
-        st.session_state.note_hi = list(prg[pos + 24:pos + 48])
-        base = pos + 48 + 36  # Saltar song_order (36 bytes)
-        if base + 800 <= len(prg):
-            songs["Tema Principal (Extraído de ROM)"] = {
-                "tempo": 6,
-                "mel": list(prg[base:base + 64]),
-                "harm": list(prg[base + 256:base + 320]),
-                "bass": list(prg[base + 512:base + 576]),
-                "drum": list(prg[base + 768:base + 784]),
-                "rom_offset": base,
-            }
-            s_base = base + 784
-            if s_base + 112 <= len(prg):
-                songs["Tema de Historia / Suspenso (ROM)"] = {
-                    "tempo": 12,
-                    "mel": list(prg[s_base:s_base + 32]),
-                    "harm": list(prg[s_base + 32:s_base + 64]),
-                    "bass": list(prg[s_base + 64:s_base + 96]),
-                    "drum": list(prg[s_base + 96:s_base + 112]),
-                    "rom_offset": s_base,
-                }
-
-    # 2. Escaneo universal de patrones rítmicos/melódicos en cualquier ROM comercial o homebrew
-    for i in range(0, len(prg) - 64, 32):
-        chunk = list(prg[i:i + 32])
-        if all(0 <= b <= 23 for b in chunk) and 8 <= len(set(chunk)) <= 16 and chunk.count(0) >= 3:
-            if len(songs) < 8:
-                songs[f"Secuencia Musical ROM @ ${i:04X}"] = {
-                    "tempo": 7,
-                    "mel": chunk,
-                    "harm": [max(0, (x - 4) if x > 4 else 0) for x in chunk],
-                    "bass": [1 if step % 2 == 0 else 8 for step in range(32)],
-                    "drum": [1 if step % 4 == 0 else (2 if step % 4 == 2 else 3) for step in range(16)],
-                    "rom_offset": i,
-                }
-    st.session_state.songs = songs
+    # Extraer todos los textos y todas las canciones de la ROM
+    st.session_state.rom_texts = extract_all_rom_texts(prg)
+    rom_songs = extract_all_rom_songs(prg)
+    if rom_songs:
+        st.session_state.songs.update(rom_songs)
 
 
 def analyze_asm_file(text: str, filename: str):
@@ -314,7 +456,6 @@ def analyze_asm_file(text: str, filename: str):
     st.session_state.asm_name = filename
     st.session_state.asm_text = text
 
-    # Extraer todas las cadenas de texto (.byte "..." y macros PRINT)
     strings = []
     for m in re.finditer(r'(PRINT\s+\$[0-9A-Fa-f]+,\s*"|[A-Za-z0-9_]+:\s*\.byte\s+"|\.asciiz\s+")([^"]*)(")', text):
         strings.append({
@@ -325,7 +466,6 @@ def analyze_asm_file(text: str, filename: str):
         })
     st.session_state.asm_strings = strings
 
-    # Extraer todas las tablas numéricas (.byte ...)
     tables = {}
     for m in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*):\s*\n?((?:\s*\.byte\s+[^\n]+\n?)+)", text, re.MULTILINE):
         lbl = m.group(1)
@@ -345,11 +485,11 @@ def analyze_asm_file(text: str, filename: str):
         st.session_state.note_lo = tables["note_lo"]
         st.session_state.note_hi = tables["note_hi"]
 
-    # Construir lista de canciones automáticamente a partir de las etiquetas del archivo .s
     songs = {}
     if "bgm_mel" in tables:
-        songs["1. Tema Principal del Juego (bgm)"] = {
+        songs["1. Tema Principal (Archivo .s)"] = {
             "tempo": 6,
+            "song_order": tables.get("song_order", list(range(16))),
             "mel": tables.get("bgm_mel", [0] * 64),
             "harm": tables.get("bgm_harm", [0] * 64),
             "bass": tables.get("bgm_bass", [0] * 64),
@@ -357,7 +497,7 @@ def analyze_asm_file(text: str, filename: str):
             "labels": ("bgm_mel", "bgm_harm", "bgm_bass", "bgm_drum"),
         }
     if "susp_mel" in tables:
-        songs["2. Tema de Historia / Suspenso (susp)"] = {
+        songs["2. Tema de Historia (Archivo .s)"] = {
             "tempo": 12,
             "mel": tables.get("susp_mel", [0] * 32),
             "harm": tables.get("susp_pad", [0] * 32),
@@ -366,7 +506,7 @@ def analyze_asm_file(text: str, filename: str):
             "labels": ("susp_mel", "susp_pad", "susp_bass", "susp_drum"),
         }
     if "sel_mel" in tables:
-        songs["3. Tema de Selección de Nave (sel)"] = {
+        songs["3. Tema Selección de Nave (Archivo .s)"] = {
             "tempo": 7,
             "mel": tables.get("sel_mel", [0] * 32),
             "harm": tables.get("sel_pad", [0] * 32),
@@ -375,21 +515,20 @@ def analyze_asm_file(text: str, filename: str):
             "labels": ("sel_mel", "sel_pad", "sel_bass", "sel_drum"),
         }
     if "go_notes" in tables:
-        songs["4. Tonada de Game Over (go_notes)"] = {
+        songs["4. Tonada de Game Over (Archivo .s)"] = {
             "tempo": 10,
             "mel": tables["go_notes"],
             "harm": [0] * len(tables["go_notes"]),
-            "bass": tables["go_notes"],
+            "bass": list(tables["go_notes"]),
             "drum": [0] * 8,
             "labels": ("go_notes", None, None, None),
         }
 
-    # Detectar cualquier otra tabla musical en otros archivos .s homebrew
     for lbl, arr in tables.items():
-        if lbl not in ("bgm_mel", "bgm_harm", "bgm_bass", "bgm_drum", "susp_mel", "susp_pad", "susp_bass", "susp_drum", "sel_mel", "sel_pad", "sel_bass", "sel_drum", "go_notes"):
-            if any(k in lbl.lower() for k in ("mel", "song", "music", "note", "tune", "sfx", "jng")):
-                songs[f"Pista Detectada: {lbl}"] = {
-                    "tempo": 7,
+        if lbl not in ("bgm_mel", "bgm_harm", "bgm_bass", "bgm_drum", "susp_mel", "susp_pad", "susp_bass", "susp_drum", "sel_mel", "sel_pad", "sel_bass", "sel_drum", "go_notes", "song_order"):
+            if any(k in lbl.lower() for k in ("mel", "song", "music", "note", "tune", "jng")):
+                songs[f"Secuencia .s: {lbl}"] = {
+                    "tempo": 6,
                     "mel": [min(23, x) for x in arr],
                     "harm": [0] * len(arr),
                     "bass": [0] * len(arr),
@@ -397,11 +536,12 @@ def analyze_asm_file(text: str, filename: str):
                     "labels": (lbl, None, None, None),
                 }
 
-    st.session_state.songs = songs
+    if songs:
+        st.session_state.songs.update(songs)
 
 
 # =============================================================================
-# FUNCIONES DE EXPORTACIÓN (.S Y .NES)
+# EXPORTADORES DE ARCHIVOS MODIFICADOS (.S Y .NES)
 # =============================================================================
 def build_updated_asm() -> bytes:
     text = st.session_state.asm_text
@@ -450,7 +590,7 @@ def build_updated_nes() -> bytes:
 
 
 # =============================================================================
-# RENDERIZADO DE TILES CHR, SPRITES Y AUDIO 2A03
+# RENDERIZADO DE GRÁFICOS CHR, SPRITES Y SÍNTESIS DE AUDIO 2A03
 # =============================================================================
 def get_tile_matrix(bank_idx: int, table_idx: int, tile_id: int):
     offset = (bank_idx * 8192) + (table_idx * 4096) + (tile_id * 16)
@@ -515,14 +655,23 @@ def render_metasprite(bank_idx: int, table_idx: int, tl: int, tr: int, bl: int, 
     return img.resize((160, 160), Image.NEAREST)
 
 
-def synthesize_song_wav(song_dict: dict) -> bytes:
+def synthesize_song_wav(song_dict: dict, play_full_order: bool = True) -> bytes:
     sample_rate = 22050
     step_frames = song_dict.get("tempo", 6)
-    mel = song_dict["mel"]
-    harm = song_dict["harm"]
-    bass = song_dict["bass"]
-    drum = song_dict["drum"]
 
+    if play_full_order and "song_order" in song_dict and len(song_dict["mel"]) >= 256:
+        mel, harm, bass = [], [], []
+        for pat in song_dict["song_order"]:
+            p_ofs = (pat & 0x0F) * 16
+            mel.extend(song_dict["mel"][p_ofs:p_ofs + 16])
+            harm.extend(song_dict["harm"][p_ofs:p_ofs + 16])
+            bass.extend(song_dict["bass"][p_ofs:p_ofs + 16])
+    else:
+        mel = song_dict["mel"]
+        harm = song_dict["harm"]
+        bass = song_dict["bass"]
+
+    drum = song_dict["drum"]
     n_lo = st.session_state.note_lo
     n_hi = st.session_state.note_hi
 
@@ -537,9 +686,8 @@ def synthesize_song_wav(song_dict: dict) -> bytes:
     samples_per_step = int(sample_rate * (step_frames / 60.0))
     pcm = bytearray()
     lfsr = 1
-    num_steps = min(128, len(mel))
 
-    for s in range(num_steps):
+    for s in range(len(mel)):
         f1 = get_freq(mel[s], False)
         f2 = get_freq(harm[s] if s < len(harm) else 0, False)
         ft = get_freq(bass[s] if s < len(bass) else 0, True)
@@ -637,62 +785,63 @@ def disassemble_6502(prg_bytes: bytes, bank_idx: int, start_offset: int, num_lin
 
 
 # =============================================================================
-# FLUJO PRINCIPAL DE LA APLICACIÓN
+# FLUJO PRINCIPAL DE LA INTERFAZ
 # =============================================================================
 init_state()
 
 st.title("🕹️ NES Shooter Studio")
-st.markdown("Suite visual universal para analizar y modificar ROMs de Nintendo NES (`*.nes`) y código fuente en ensamblador 6502 (`*.s` / `*.asm`).")
+st.markdown("Herramienta visual universal para inspeccionar y modificar ROMs de Nintendo NES (`*.nes`) y código en ensamblador 6502 (`*.s` / `*.asm`).")
 
 # -----------------------------------------------------------------------------
-# PASO 1: PANTALLA LIMPIA HASTA QUE SE SUBA UN ARCHIVO .NES O .S
+# PANTALLA INICIAL LIMPIA HASTA SUBIR UN ARCHIVO
 # -----------------------------------------------------------------------------
 if not st.session_state.has_nes and not st.session_state.has_asm:
     st.markdown("""
     <div class="studio-card">
-        <h3>📂 Paso 1: Sube tu archivo para comenzar el análisis</h3>
-        <p>Selecciona cualquier archivo <b>.nes</b> (ROM compilada comercial o homebrew) o un archivo <b>.s / .asm</b> (código fuente en ensamblador 6502). Una vez subido, la aplicación analizará sus bancos gráficos, textos, tablas, vectores y canciones automáticamente.</p>
+        <h3>📂 Sube un archivo para comenzar</h3>
+        <p>Selecciona un archivo <b>.nes</b> (ROM compilada) o un archivo <b>.s / .asm</b> (código fuente 6502). El sistema analizará automáticamente sus gráficos, canciones chiptune, textos de pantalla y código máquina.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    u_col1, u_col2 = st.columns(2)
-    with u_col1:
-        up_nes_main = st.file_uploader("💿 Subir archivo ROM (*.nes)", type=["nes"], key="main_nes_up")
+    c_up1, c_up2 = st.columns(2)
+    with c_up1:
+        up_nes_main = st.file_uploader("💿 Subir ROM de NES (*.nes)", type=["nes"], key="up_nes_init")
         if up_nes_main is not None:
             analyze_nes_file(bytearray(up_nes_main.read()), up_nes_main.name)
             st.rerun()
-    with u_col2:
-        up_asm_main = st.file_uploader("📝 Subir código ensamblador (*.s / *.asm)", type=["s", "asm"], key="main_asm_up")
+    with c_up2:
+        up_asm_main = st.file_uploader("📝 Subir código ensamblador (*.s / *.asm)", type=["s", "asm"], key="up_asm_init")
         if up_asm_main is not None:
             analyze_asm_file(up_asm_main.read().decode("utf-8", errors="ignore"), up_asm_main.name)
             st.rerun()
     st.stop()
 
 # -----------------------------------------------------------------------------
-# BARRA LATERAL (GESTIÓN DE ARCHIVOS CARGADOS Y DESCARGAS)
+# BARRA LATERAL CON ARCHIVOS CARGADOS Y DESCARGA DIRECTA
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.header("📂 Archivos en Sesión")
+    st.header("📂 Archivos Analizados")
     if st.session_state.has_nes:
         st.success(f"💿 ROM: {st.session_state.nes_name}")
+        st.caption(f"Canciones: {len(st.session_state.songs)} | Textos: {len(st.session_state.rom_texts)}")
     if st.session_state.has_asm:
-        st.success(f"📝 ASM: {st.session_state.asm_name}")
+        st.success(f"📝 Código: {st.session_state.asm_name}")
 
     st.markdown("**Cargar o añadir otro archivo:**")
-    side_nes = st.file_uploader("Cambiar / Añadir ROM (.nes)", type=["nes"], key="side_nes")
+    side_nes = st.file_uploader("Añadir / Cambiar ROM (.nes)", type=["nes"], key="side_nes_u")
     if side_nes is not None:
-        if st.button("📥 Analizar esta ROM .nes", use_container_width=True):
+        if st.button("📥 Procesar ROM .nes", use_container_width=True):
             analyze_nes_file(bytearray(side_nes.read()), side_nes.name)
             st.rerun()
 
-    side_asm = st.file_uploader("Cambiar / Añadir Código (.s)", type=["s", "asm"], key="side_asm")
+    side_asm = st.file_uploader("Añadir / Cambiar Código (.s)", type=["s", "asm"], key="side_asm_u")
     if side_asm is not None:
-        if st.button("📥 Analizar este Código .s", use_container_width=True):
+        if st.button("📥 Procesar Código .s", use_container_width=True):
             analyze_asm_file(side_asm.read().decode("utf-8", errors="ignore"), side_asm.name)
             st.rerun()
 
     st.divider()
-    st.header("💾 Guardar Cambios")
+    st.header("💾 Exportar Archivo")
     if st.session_state.has_nes:
         st.download_button(
             "⬇️ Descargar ROM (.nes) Modificada",
@@ -711,133 +860,102 @@ with st.sidebar:
         )
 
     st.divider()
-    if st.button("🔄 Cerrar archivos y volver al inicio", use_container_width=True):
+    if st.button("🔄 Cerrar todo y volver al inicio", use_container_width=True):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
 
 # -----------------------------------------------------------------------------
-# PESTAÑAS DINÁMICAS SEGÚN LOS ARCHIVOS ANALIZADOS
+# PESTAÑAS PRINCIPALES
 # -----------------------------------------------------------------------------
-tab_spr, tab_mus, tab_txt, tab_ins = st.tabs([
-    "🎨 1. Visor y Editor de Sprites",
-    "🎵 2. Canciones Chiptune (2A03)",
-    "📝 3. Editor de Textos y Parámetros",
-    "🔍 4. Inspector de ROM y Código 6502"
+tab_mus, tab_txt, tab_spr, tab_ins = st.tabs([
+    f"🎵 1. Canciones Chiptune ({len(st.session_state.songs)})",
+    f"📝 2. Editor de Textos ({len(st.session_state.rom_texts) + len(st.session_state.asm_strings)})",
+    "🎨 3. Visor y Editor de Sprites",
+    "🔍 4. Inspector Técnico y Código 6502"
 ])
 
 # =============================================================================
-# PESTAÑA 1: VISOR Y EDITOR DE SPRITES
-# =============================================================================
-with tab_spr:
-    if not st.session_state.has_nes:
-        st.info("💡 Sube un archivo **.nes** en el panel izquierdo para visualizar y editar los gráficos CHR-ROM y los sprites.")
-    else:
-        num_chr = max(1, len(st.session_state.chr_data) // 8192)
-        col_s1, col_s2, col_s3 = st.columns([1.15, 1.15, 1])
-
-        with col_s1:
-            st.subheader("1. Selecciona un Bloque Gráfico")
-            b_idx = st.selectbox("Banco Gráfico CHR (8 KB):", range(num_chr), format_func=lambda i: f"Banco #{i}")
-            t_idx = st.radio("Tabla de Patrones:", [0, 1], format_func=lambda x: "Tabla 0: Fondo / Escenario" if x == 0 else "Tabla 1: Naves / Personajes", horizontal=True, index=1)
-            p_grp = st.selectbox("Paleta de Color:", range(8), index=4, format_func=lambda g: f"Paleta #{g} ({'Fondo' if g < 4 else 'Sprite'})")
-            tile_num = st.number_input("Número de Tile a editar (0 a 255):", 0, 255, 128)
-
-            st.image(render_chr_sheet(b_idx, t_idx, p_grp, tile_num), caption=f"Mapa completo de 256 tiles (Tile #{tile_num} seleccionado en azul)")
-
-        with col_s2:
-            st.subheader(f"2. Editor del Tile #{tile_num}")
-            st.caption("Cambia los valores (0=Transparente, 1=Color 1, 2=Color 2, 3=Color 3) y pulsa Aplicar:")
-            cur_mat = get_tile_matrix(b_idx, t_idx, tile_num)
-            new_mat = st.data_editor(cur_mat, use_container_width=True, key=f"tile_grid_{b_idx}_{t_idx}_{tile_num}")
-            if st.button("✔ Aplicar cambios al Tile", use_container_width=True):
-                set_tile_matrix(b_idx, t_idx, tile_num, new_mat)
-                st.success(f"Tile #{tile_num} actualizado en la ROM.")
-                st.rerun()
-
-            st.markdown("**Colores de la Paleta seleccionada (0 a 63 de la NES):**")
-            pc = st.columns(4)
-            for ci in range(4):
-                with pc[ci]:
-                    p_pos = p_grp * 4 + ci
-                    st.session_state.palette[p_pos] = st.number_input(f"C{ci}", 0, 63, int(st.session_state.palette[p_pos]), key=f"p_{p_pos}")
-                    hx = rgb_hex(nes_rgb(st.session_state.palette[p_pos]))
-                    st.markdown(f"<div style='height:22px;background:{hx};border:2px solid #334155;border-radius:4px;'></div>", unsafe_allow_html=True)
-
-        with col_s3:
-            st.subheader("3. Visor de Sprite 16×16")
-            st.caption("Previsualiza cómo se ve la nave o personaje completo uniendo sus tiles superior e inferior:")
-            top_t = st.number_input("Tile Mitad Superior:", 0, 255, tile_num)
-            bot_t = st.number_input("Tile Mitad Inferior:", 0, 255, min(255, tile_num + 1))
-            sym_mode = st.checkbox("Simetría horizontal automática (Espejo)", value=True)
-            st.image(render_metasprite(b_idx, t_idx, top_t, top_t, bot_t, bot_t, sym_mode, p_grp), caption="Vista previa de Sprite 16×16")
-
-# =============================================================================
-# PESTAÑA 2: CANCIONES CHIPTUNE DETECTADAS Y EDITOR SIMPLE
+# PESTAÑA 1: CANCIONES CHIPTUNE DETECTADAS Y EDITOR PASO A PASO
 # =============================================================================
 with tab_mus:
-    st.subheader("🎵 Canciones y Secuencias Chiptune Detectadas")
+    st.subheader("🎵 Canciones Detectadas en el Juego")
     songs = st.session_state.songs
 
     if not songs:
-        st.warning("No se detectaron tablas musicales automáticamente en este archivo.")
+        st.warning("No se encontraron canciones en el archivo actual.")
     else:
-        m_col1, m_col2 = st.columns([1, 1.5])
-        with m_col1:
-            song_names = list(songs.keys())
-            sel_song_name = st.selectbox("🎼 Elige una canción de la lista:", song_names)
-            active_song = songs[sel_song_name]
+        col_m1, col_m2 = st.columns([1, 1.55])
+        with col_m1:
+            song_list = list(songs.keys())
+            chosen_song = st.selectbox("🎼 Selecciona una canción para escuchar o modificar:", song_list)
+            s_data = songs[chosen_song]
 
-            active_song["tempo"] = st.slider(
-                "Velocidad de la canción (menor número = más rápido):",
-                min_value=3, max_value=18, value=int(active_song.get("tempo", 6))
+            s_data["tempo"] = st.slider(
+                "Velocidad de reproducción (menor = más rápido):",
+                min_value=3, max_value=18, value=int(s_data.get("tempo", 6))
             )
 
-            wav_bytes = synthesize_song_wav(active_song)
-            st.markdown("**🔊 Reproductor integrado (Chip 2A03):**")
-            st.audio(wav_bytes, format="audio/wav")
+            wav_audio = synthesize_song_wav(s_data, play_full_order=True)
+            st.markdown("**🔊 Escuchar canción completa (Sintetizador NES 2A03):**")
+            st.audio(wav_audio, format="audio/wav")
 
             st.download_button(
-                "⬇️ Descargar esta canción en formato .WAV",
-                data=wav_bytes,
-                file_name=f"{sel_song_name[:20].strip()}.wav",
+                "⬇️ Descargar canción en audio .WAV",
+                data=wav_audio,
+                file_name=f"{chosen_song[:22].strip()}.wav",
                 mime="audio/wav",
                 use_container_width=True,
             )
 
-        with m_col2:
-            st.markdown(f"**🎹 Editor Paso a Paso: `{sel_song_name}`**")
-            st.caption("Haz clic en cualquier celda para cambiar la nota musical o el golpe de batería y pulsa el botón de abajo para escuchar tu cambio:")
+            if "song_order" in s_data:
+                st.markdown("**Orden de los compases de la canción (`song_order`):**")
+                ord_txt = st.text_input("Secuencia de compases (0 a 15):", ", ".join(str(x) for x in s_data["song_order"]))
+                try:
+                    new_ord = [int(x.strip()) for x in ord_txt.split(",") if x.strip() != ""]
+                    if len(new_ord) == len(s_data["song_order"]):
+                        s_data["song_order"] = new_ord
+                        if "offsets" in s_data and "order" in s_data["offsets"] and st.session_state.has_nes:
+                            o_pos = s_data["offsets"]["order"]
+                            st.session_state.prg_data[o_pos:o_pos + len(new_ord)] = bytearray(new_ord)
+                except ValueError:
+                    pass
 
-            mel_arr = active_song["mel"]
-            harm_arr = active_song["harm"]
-            bass_arr = active_song["bass"]
-            drum_arr = active_song["drum"]
+        with col_m2:
+            st.markdown(f"**🎹 Editor de Notas Musicales: `{chosen_song}`**")
+            mel_arr = s_data["mel"]
+            harm_arr = s_data["harm"]
+            bass_arr = s_data["bass"]
+            drum_arr = s_data["drum"]
 
-            total_blocks = max(1, (len(mel_arr) + 15) // 16)
-            blk = 0
-            if total_blocks > 1:
-                blk = st.selectbox("Compás / Bloque de 16 pasos a editar:", range(total_blocks), format_func=lambda b: f"Compás #{b + 1} (Pasos {b*16} a {b*16 + 15})")
+            num_measures = max(1, (len(mel_arr) + 15) // 16)
+            measure_idx = 0
+            if num_measures > 1:
+                measure_idx = st.selectbox(
+                    "Seleccionar Compás (16 pasos por compás):",
+                    range(num_measures),
+                    format_func=lambda m: f"Compás #{m} (Pasos {m*16} al {min(len(mel_arr)-1, m*16+15)})"
+                )
 
-            start_s = blk * 16
-            end_s = min(len(mel_arr), start_s + 16)
+            s_start = measure_idx * 16
+            s_end = min(len(mel_arr), s_start + 16)
 
-            step_rows = []
-            for s in range(start_s, end_s):
-                m_v = mel_arr[s] if s < len(mel_arr) else 0
-                h_v = harm_arr[s] if s < len(harm_arr) else 0
-                b_v = bass_arr[s] if s < len(bass_arr) else 0
-                d_v = drum_arr[s % len(drum_arr)] if drum_arr else 0
-                step_rows.append({
+            rows = []
+            for s in range(s_start, s_end):
+                mv = mel_arr[s] if s < len(mel_arr) else 0
+                hv = harm_arr[s] if s < len(harm_arr) else 0
+                bv = bass_arr[s] if s < len(bass_arr) else 0
+                dv = drum_arr[s % len(drum_arr)] if drum_arr else 0
+                rows.append({
                     "Paso": f"Paso {s:02d}",
-                    "Melodia": NOTE_NAMES[m_v] if m_v < len(NOTE_NAMES) else NOTE_NAMES[0],
-                    "Armonia": NOTE_NAMES[h_v] if h_v < len(NOTE_NAMES) else NOTE_NAMES[0],
-                    "Bajo": NOTE_NAMES[b_v] if b_v < len(NOTE_NAMES) else NOTE_NAMES[0],
-                    "Bateria": DRUM_NAMES[d_v] if d_v < len(DRUM_NAMES) else DRUM_NAMES[0],
+                    "Melodia": NOTE_NAMES[mv] if mv < len(NOTE_NAMES) else NOTE_NAMES[0],
+                    "Armonia": NOTE_NAMES[hv] if hv < len(NOTE_NAMES) else NOTE_NAMES[0],
+                    "Bajo": NOTE_NAMES[bv] if bv < len(NOTE_NAMES) else NOTE_NAMES[0],
+                    "Bateria": DRUM_NAMES[dv] if dv < len(DRUM_NAMES) else DRUM_NAMES[0],
                 })
 
-            ed_steps = st.data_editor(
-                step_rows,
+            edited_rows = st.data_editor(
+                rows,
                 disabled=["Paso"],
                 column_config={
                     "Melodia": st.column_config.SelectboxColumn("Pulso 1 (Melodía)", options=NOTE_NAMES),
@@ -847,90 +965,158 @@ with tab_mus:
                 },
                 use_container_width=True,
                 height=380,
-                key=f"song_ed_{sel_song_name}_{blk}"
+                key=f"ed_song_{chosen_song}_{measure_idx}"
             )
 
-            if st.button("✔ Actualizar Canción y Escuchar", use_container_width=True):
-                for idx_r, r in enumerate(ed_steps):
-                    pos = start_s + idx_r
+            if st.button("✔ Guardar cambios en la canción y actualizar audio", use_container_width=True):
+                for i_r, r in enumerate(edited_rows):
+                    pos = s_start + i_r
                     if pos < len(mel_arr):
                         mel_arr[pos] = NOTE_TO_IDX.get(r["Melodia"], 0)
                     if pos < len(harm_arr):
                         harm_arr[pos] = NOTE_TO_IDX.get(r["Armonia"], 0)
                     if pos < len(bass_arr):
                         bass_arr[pos] = NOTE_TO_IDX.get(r["Bajo"], 0)
-                    if (pos % len(drum_arr)) < len(drum_arr):
+                    if drum_arr and (pos % len(drum_arr)) < len(drum_arr):
                         drum_arr[pos % len(drum_arr)] = DRUM_TO_IDX.get(r["Bateria"], 0)
 
-                # Si la canción proviene del binario .nes, escribir también en PRG-ROM
-                if "rom_offset" in active_song and st.session_state.has_nes:
-                    rofs = active_song["rom_offset"]
-                    for i_m, v_m in enumerate(mel_arr):
-                        if rofs + i_m < len(st.session_state.prg_data):
-                            st.session_state.prg_data[rofs + i_m] = v_m
+                # Sincronizar directamente con el binario PRG-ROM si hay un .nes cargado
+                if "offsets" in s_data and st.session_state.has_nes:
+                    ofs_map = s_data["offsets"]
+                    prg = st.session_state.prg_data
+                    if "mel" in ofs_map:
+                        prg[ofs_map["mel"]:ofs_map["mel"] + len(mel_arr)] = bytearray(mel_arr)
+                    if "harm" in ofs_map:
+                        prg[ofs_map["harm"]:ofs_map["harm"] + len(harm_arr)] = bytearray(harm_arr)
+                    if "bass" in ofs_map:
+                        prg[ofs_map["bass"]:ofs_map["bass"] + len(bass_arr)] = bytearray(bass_arr)
+                    if "drum" in ofs_map:
+                        prg[ofs_map["drum"]:ofs_map["drum"] + len(drum_arr)] = bytearray(drum_arr)
+                st.success("✔ Canción actualizada.")
                 st.rerun()
 
 # =============================================================================
-# PESTAÑA 3: EDITOR DE TEXTOS Y PARÁMETROS
+# PESTAÑA 2: EDITOR COMPLETO DE TEXTOS (ROM .NES Y CÓDIGO .S)
 # =============================================================================
 with tab_txt:
-    col_t1, col_t2 = st.columns(2)
+    if st.session_state.has_nes:
+        st.subheader(f"🔤 Textos Detectados en la ROM `{st.session_state.nes_name}` ({len(st.session_state.rom_texts)} textos)")
+        st.caption("Incluye tanto los textos impresos en pantalla vía código (`PRESS START`, `HI-SCORE`, `Herscom - 2026`, `SELECCIONA TU NAVE`, `FACIL`, `DIFICIL`, `Preparados`) como las cadenas de datos (`GAMEOVER` y las 15 líneas de la historia). Haz doble clic en cualquier celda de la columna **Texto** para editarla:")
 
-    with col_t1:
-        st.subheader("📝 Textos del Archivo Ensamblador (.s)")
-        if not st.session_state.has_asm:
-            st.info("Sube un archivo **.s / .asm** para editar sus textos, líneas de historia y parámetros con nombre.")
-        else:
-            if st.session_state.asm_strings:
-                st.caption("Modifica cualquier texto en la columna **Texto**:")
-                ed_asm_s = st.data_editor(
-                    st.session_state.asm_strings,
-                    column_order=("Identificador", "Texto", "Caracteres"),
-                    disabled=["Identificador", "Caracteres"],
-                    use_container_width=True,
-                    height=380,
-                )
-                st.session_state.asm_strings = ed_asm_s
+        t_col1, t_col2 = st.columns([1.4, 1])
+        with t_col1:
+            ed_rom_txt = st.data_editor(
+                st.session_state.rom_texts,
+                column_order=("ID", "Tipo", "Direccion", "Texto", "Max_Chars"),
+                disabled=["ID", "Tipo", "Direccion", "Max_Chars"],
+                use_container_width=True,
+                height=440,
+                key="rom_txt_editor"
+            )
+            if st.button("✔ Aplicar todos los textos modificados en la ROM (.nes)", use_container_width=True):
+                prg = st.session_state.prg_data
+                for item in ed_rom_txt:
+                    ofs = item["_offset"]
+                    mx = item["Max_Chars"]
+                    padded_str = item["Texto"][:mx].ljust(mx)
+                    if item["_mode"] == "ppu":
+                        # Escribir cada carácter en el operando inmediato de LDA #'char' (A9 XX 8D 07 20)
+                        for idx_c, ch in enumerate(padded_str):
+                            prg[ofs + idx_c * 5 + 1] = ord(ch) & 0x7F
+                    else:
+                        prg[ofs:ofs + mx] = padded_str.encode("ascii", errors="replace")
+                st.session_state.rom_texts = ed_rom_txt
+                st.success("✔ Todos los textos fueron parcheados directamente en la ROM.")
+                st.rerun()
 
-                story_preview = [r["Texto"] for r in ed_asm_s if "st_l" in r["Identificador"]]
-                if story_preview:
-                    st.markdown("**Vista previa en pantalla de TV NES:**")
-                    st.markdown(f'<div class="tv-preview">' + "\n".join(story_preview) + '</div>', unsafe_allow_html=True)
+        with t_col2:
+            st.markdown("**📺 Vista Previa en Pantalla de TV NES:**")
+            ui_lines = [f"{r['Direccion']} [{r['Tipo'][:11]}]: \"{r['Texto']}\"" for r in ed_rom_txt if not r["ID"].startswith("HISTORIA_")]
+            story_lines = [r["Texto"] for r in ed_rom_txt if r["ID"].startswith("HISTORIA_")]
 
-    with col_t2:
-        st.subheader("🔤 Textos Internos del Binario (.nes)")
-        if not st.session_state.has_nes:
-            st.info("Sube un archivo **.nes** para escanear y parchear los textos guardados dentro de la ROM.")
-        else:
-            prg = st.session_state.prg_data
-            found = list(re.finditer(rb"[A-Za-z0-9\-\.,!# ]{5,}", bytes(prg)))
-            if found:
-                st.caption("Edita la columna **Texto_En_ROM** (se ajustará automáticamente al tamaño exacto para no dañar la ROM):")
-                rom_rows = [
-                    {
-                        "Direccion": f"${m.start():04X}",
-                        "Texto_En_ROM": m.group(0).decode("ascii", errors="ignore"),
-                        "Largo_Max": len(m.group(0)),
-                    }
-                    for m in found[:45]
-                ]
-                ed_rom = st.data_editor(rom_rows, disabled=["Direccion", "Largo_Max"], use_container_width=True, height=380)
-                if st.button("✔ Aplicar Textos en la ROM (.nes)", use_container_width=True):
-                    for r in ed_rom:
-                        ofs = int(r["Direccion"][1:], 16)
-                        ln = int(r["Largo_Max"])
-                        st.session_state.prg_data[ofs:ofs + ln] = r["Texto_En_ROM"][:ln].ljust(ln).encode("ascii", errors="replace")
-                    st.success("✔ Textos actualizados en la ROM.")
+            preview_text = "=== TEXTOS DE INTERFAZ Y PANTALLAS ===\n" + "\n".join(ui_lines)
+            if story_lines:
+                preview_text += "\n\n=== PANTALLA DE HISTORIA (26 COLS) ===\n" + "\n".join(story_lines)
+            st.markdown(f'<div class="tv-preview">{preview_text}</div>', unsafe_allow_html=True)
+
+    if st.session_state.has_asm:
+        st.divider()
+        st.subheader(f"📜 Textos Detectados en `{st.session_state.asm_name}`")
+        ed_asm_txt = st.data_editor(
+            st.session_state.asm_strings,
+            column_order=("Identificador", "Texto", "Caracteres"),
+            disabled=["Identificador", "Caracteres"],
+            use_container_width=True,
+            height=340,
+            key="asm_txt_editor"
+        )
+        st.session_state.asm_strings = ed_asm_txt
 
 # =============================================================================
-# PESTAÑA 4: INSPECTOR TÉCNICO DE ROM Y DESENSAMBLADOR 6502
+# PESTAÑA 3: VISOR Y EDITOR DE SPRITES Y CHR-ROM
+# =============================================================================
+with tab_spr:
+    if not st.session_state.has_nes:
+        st.info("💡 Sube un archivo **.nes** en el menú izquierdo para visualizar y editar los gráficos CHR-ROM.")
+    else:
+        num_chr = max(1, len(st.session_state.chr_data) // 8192)
+        col_s1, col_s2, col_s3 = st.columns([1.15, 1.15, 1])
+
+        with col_s1:
+            st.subheader("1. Mapa de Bloques CHR-ROM")
+            b_idx = st.selectbox("Banco CHR (8 KB):", range(num_chr), format_func=lambda i: f"Banco #{i}")
+            t_idx = st.radio("Tabla de Gráficos:", [0, 1], format_func=lambda x: "Tabla 0: Fondo y Letras ($0000)" if x == 0 else "Tabla 1: Naves y Enemigos ($1000)", horizontal=True, index=1)
+            p_grp = st.selectbox("Paleta de Color:", range(8), index=4, format_func=lambda g: f"Paleta #{g} ({'Fondo' if g < 4 else 'Sprite'})")
+            tile_num = st.number_input("Elegir Tile (0 a 255):", 0, 255, 128)
+
+            st.image(render_chr_sheet(b_idx, t_idx, p_grp, tile_num), caption=f"Tile #{tile_num} marcado en recuadro azul")
+
+        with col_s2:
+            st.subheader(f"2. Editor del Tile #{tile_num}")
+            st.caption("Modifica los valores de color (0=Transparente, 1..3=Colores) y guarda el bloque:")
+            cur_mat = get_tile_matrix(b_idx, t_idx, tile_num)
+            new_mat = st.data_editor(cur_mat, use_container_width=True, key=f"t_ed_{b_idx}_{t_idx}_{tile_num}")
+            if st.button("✔ Guardar cambios en el Tile", use_container_width=True):
+                set_tile_matrix(b_idx, t_idx, tile_num, new_mat)
+                st.success(f"Tile #{tile_num} actualizado.")
+                st.rerun()
+
+            st.markdown("**Colores de la Paleta activa (0..63):**")
+            pc = st.columns(4)
+            for ci in range(4):
+                with pc[ci]:
+                    p_pos = p_grp * 4 + ci
+                    st.session_state.palette[p_pos] = st.number_input(f"C{ci}", 0, 63, int(st.session_state.palette[p_pos]), key=f"pal_in_{p_pos}")
+                    hx = rgb_hex(nes_rgb(st.session_state.palette[p_pos]))
+                    st.markdown(f"<div style='height:22px;background:{hx};border:2px solid #334155;border-radius:4px;'></div>", unsafe_allow_html=True)
+
+        with col_s3:
+            st.subheader("3. Previsualizador de Naves 16×16")
+            st.caption("Elige un modelo predefinido o combina cualquier par de tiles:")
+            preset = st.selectbox("Atajo rápido de Sprite:", [
+                ("Nave Jugador #1 (Tiles 128/129)", 128, 129, 4),
+                ("Nave Jugador #2 (Tiles 130/131)", 130, 131, 5),
+                ("Nave Jugador #3 (Tiles 132/133)", 132, 133, 6),
+                ("Enemigo 1: Zig-Zag (Tiles 3/4)", 3, 4, 5),
+                ("Enemigo 2: Circular (Tiles 9/10)", 9, 10, 6),
+                ("Enemigo 3: Fraccionador (Tiles 11/12)", 11, 12, 7),
+                ("Enemigo 4: Vertical (Tiles 24/25)", 24, 25, 5),
+                ("Personalizado (Usar Tile actual)", tile_num, min(255, tile_num + 1), p_grp),
+            ], format_func=lambda x: x[0])
+
+            top_t = st.number_input("Tile Superior:", 0, 255, preset[1])
+            bot_t = st.number_input("Tile Inferior:", 0, 255, preset[2])
+            sym_mode = st.checkbox("Reflejar mitad derecha (Simetría)", value=True)
+            st.image(render_metasprite(b_idx, 1, top_t, top_t, bot_t, bot_t, sym_mode, preset[3]), caption=preset[0])
+
+# =============================================================================
+# PESTAÑA 4: INSPECTOR DE ROM Y DESENSAMBLADOR 6502
 # =============================================================================
 with tab_ins:
     if st.session_state.has_nes:
-        st.subheader(f"🔍 Análisis Técnico de `{st.session_state.nes_name}`")
+        st.subheader(f"🔍 Información Técnica de `{st.session_state.nes_name}`")
         hdr = st.session_state.header
         prg = st.session_state.prg_data
-        chr_d = st.session_state.chr_data
 
         prg_b, chr_b, f6, f7 = hdr[4], hdr[5], hdr[6], hdr[7]
         mapper = (f7 & 0xF0) | (f6 >> 4)
@@ -941,44 +1127,32 @@ with tab_ins:
         irq_v = prg[-2] | (prg[-1] << 8) if len(prg) >= 6 else 0
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Mapper", f"#{mapper}", MAPPER_NAMES.get(mapper, "Especial"))
+        m1.metric("Mapper iNES", f"#{mapper}", MAPPER_NAMES.get(mapper, "Especial"))
         m2.metric("Código PRG-ROM", f"{prg_b * 16} KB ({prg_b} bancos)")
         m3.metric("Gráficos CHR", f"{chr_b * 8} KB" if chr_b > 0 else "CHR-RAM")
         m4.metric("Mirroring", mirror)
 
         st.markdown(f"""
         <div class="studio-card">
-            <b>Vectores de Arranque e Interrupción del Procesador 6502:</b><br>
-            • <b>Vector RESET ($FFFC):</b> <code>${rst_v:04X}</code> (Punto donde inicia el programa al encender la consola)<br>
-            • <b>Vector NMI ($FFFA):</b> <code>${nmi_v:04X}</code> (Interrupción de refresco de pantalla a 60 Hz)<br>
-            • <b>Vector IRQ ($FFFE):</b> <code>${irq_v:04X}</code> (Interrupción de audio/mapper)
+            <b>Vectores de Hardware 6502:</b>
+            &nbsp;&nbsp;• <b>RESET ($FFFC):</b> <code>${rst_v:04X}</code>
+            &nbsp;&nbsp;|&nbsp;&nbsp; <b>NMI ($FFFA):</b> <code>${nmi_v:04X}</code>
+            &nbsp;&nbsp;|&nbsp;&nbsp; <b>IRQ ($FFFE):</b> <code>${irq_v:04X}</code>
         </div>
         """, unsafe_allow_html=True)
 
-        st.subheader("⚙️ Desensamblador 6502 en Vivo")
+        st.subheader("⚙️ Desensamblador de Código Máquina 6502")
         num_p_banks = max(1, len(prg) // 16384)
         dc1, dc2, dc3 = st.columns(3)
         with dc1:
             b_sel = st.selectbox("Banco PRG:", range(num_p_banks), index=num_p_banks - 1)
         with dc2:
-            jump_vec = st.selectbox("Saltar a dirección:", [
-                ("Inicio del vector RESET", rst_v & 0x3FFF),
-                ("Inicio del vector NMI", nmi_v & 0x3FFF),
-                ("Inicio del Banco ($0000)", 0x0000),
-            ], format_func=lambda x: f"{x[0]} (+${x[1]:04X})")
+            jump_vec = st.selectbox("Punto de entrada:", [
+                ("Rutina de Inicio (Vector RESET)", rst_v & 0x3FFF),
+                ("Rutina de Video (Vector NMI)", nmi_v & 0x3FFF),
+                ("Inicio del Banco ($C000)", 0x0000),
+            ], format_func=lambda x: f"{x[0]} (${0xC000 + x[1]:04X})")
         with dc3:
-            n_lines = st.slider("Líneas de código a mostrar:", 20, 120, 45)
+            n_lines = st.slider("Instrucciones a mostrar:", 20, 120, 45)
 
         st.markdown(f'<div class="asm-viewer">{disassemble_6502(prg, b_sel, jump_vec[1], n_lines)}</div>', unsafe_allow_html=True)
-
-    if st.session_state.has_asm:
-        st.subheader(f"📄 Tablas de Datos Detectadas en `{st.session_state.asm_name}`")
-        if st.session_state.asm_tables:
-            sel_t = st.selectbox("Inspeccionar / Editar tabla `.byte`:", list(st.session_state.asm_tables.keys()))
-            vals = st.session_state.asm_tables[sel_t]
-            raw_s = st.text_area(f"Bytes de `{sel_t}` ({len(vals)} elementos):", ", ".join(str(v) for v in vals), height=110)
-            if st.button(f"✔ Guardar cambios en tabla `{sel_t}`"):
-                nums = [int(x) for x in re.findall(r"\d+", raw_s)]
-                if nums:
-                    st.session_state.asm_tables[sel_t] = nums
-                    st.success(f"Tabla `{sel_t}` actualizada.")
