@@ -3,11 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NES Shooter Studio - Universal NES ROM & Homebrew Toolkit</title>
+  <title>NES Shooter Studio</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.0/build/stlite.css" />
   <style>
-    body, html { margin: 0; padding: 0; height: 100%; background-color: #0e0e18; }
-    #root { height: 100vh; }
+    body, html {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background-color: #f1f5f9;
+    }
+    #root {
+      height: 100vh;
+    }
   </style>
 </head>
 <body>
@@ -19,9 +26,7 @@
         requirements: ["pillow"],
         entrypoint: "app.py",
         files: {
-          "app.py": { url: "./app.py" },
-          "shooter.s": { url: "./shooter.s" },
-          "shooter.nes": { url: "./shooter.nes" }
+          "app.py": { url: "./app.py" }
         }
       },
       document.getElementById("root")
