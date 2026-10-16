@@ -6,15 +6,8 @@
   <title>NES Shooter Studio</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.0/build/stlite.css" />
   <style>
-    body, html {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-      background-color: #f1f5f9;
-    }
-    #root {
-      height: 100vh;
-    }
+    body, html { margin: 0; padding: 0; height: 100%; background-color: #f8fafc; }
+    #root { height: 100vh; }
   </style>
 </head>
 <body>
@@ -23,7 +16,7 @@
   <script>
     stlite.mount(
       {
-        requirements: ["pillow"],
+        requirements: ["pillow", "numpy"],
         entrypoint: "app.py",
         files: {
           "app.py": { url: "./app.py" }
