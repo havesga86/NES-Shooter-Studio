@@ -1,4 +1,6 @@
 import io
+import math
+import os
 import re
 import struct
 import wave
@@ -7,7 +9,7 @@ import streamlit as st
 from PIL import Image, ImageDraw
 
 # =============================================================================
-# CONFIGURACIÓN DE PÁGINA Y CSS DE ALTO CONTRASTE
+# CONFIGURACIÓN DE PÁGINA Y CSS DE ALTO CONTRASTE (ANTI-MODO OSCURO)
 # =============================================================================
 st.set_page_config(
     page_title="NES Shooter Studio",
@@ -90,7 +92,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# CONSTANTES DE HARDWARE NES (PALETA 2C02, MAPPERS, OPCODES 6502)
+# CONSTANTES DE HARDWARE NES
 # =============================================================================
 NES_MASTER_PALETTE = np.array([
     [84, 84, 84], [0, 30, 116], [8, 16, 144], [48, 0, 136],
@@ -114,7 +116,7 @@ NES_MASTER_PALETTE = np.array([
 MAPPER_NAMES = {
     0: "NROM (Estándar 16-32KB PRG)",
     1: "MMC1 (SxROM - Nintendo)",
-    2: "UxROM (PRG Switch + CHR-RAM, ej. Castlevania / Contra)",
+    2: "UxROM (PRG Switch + CHR-RAM, ej. Castlevania / Mega Man)",
     3: "CNROM (Cambio de bancos CHR)",
     4: "MMC3 (TxROM - Contador IRQ)",
     7: "AxROM (Single-Screen)",
@@ -177,48 +179,8 @@ DEFAULT_NOTE_LO = [0x00,0xA6,0x3A,0xFB,0xC4,0xAB,0x7C,0x67,0x52,0x2D,0x1C,0xFD,0
 DEFAULT_NOTE_HI = [0x00,0x02,0x02,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
 
 
-def nes_rgb(idx):
-    return tuple(int(x) for x in NES_MASTER_PALETTE[idx & 0x3F])
-
-
-def rgb_hex(rgb):
-    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-
-
 # =============================================================================
-# ESTADO DE LA SESIÓN
-# =============================================================================
-def init_state():
-    if "initialized" in st.session_state:
-        return
-    st.session_state.initialized = True
-    st.session_state.has_nes = False
-    st.session_state.has_asm = False
-    st.session_state.nes_name = ""
-    st.session_state.asm_name = ""
-    st.session_state.asm_text = ""
-
-    st.session_state.header = bytearray()
-    st.session_state.prg_data = bytearray()
-    st.session_state.chr_data = bytearray()
-    st.session_state.chr_source_info = ""
-    st.session_state.palette = [
-        0x0F, 0x00, 0x0C, 0x18, 0x0F, 0x01, 0x02, 0x12,
-        0x0F, 0x16, 0x27, 0x38, 0x0F, 0x30, 0x00, 0x10,
-        0x0F, 0x2C, 0x38, 0x11, 0x0F, 0x0C, 0x24, 0x38,
-        0x0F, 0x2A, 0x38, 0x30, 0x0F, 0x30, 0x16, 0x27
-    ]
-
-    st.session_state.rom_texts = []
-    st.session_state.asm_strings = []
-    st.session_state.asm_tables = {}
-    st.session_state.songs = {}
-    st.session_state.note_lo = list(DEFAULT_NOTE_LO)
-    st.session_state.note_hi = list(DEFAULT_NOTE_HI)
-
-
-# =============================================================================
-# EXTRACTOR DE GRÁFICOS CHR-RAM Y DESCOMPRESOR KONAMI RLE (EJ. CASTLEVANIA)
+# DESCOMPRESOR CHR-RAM (KONAMI RLE)
 # =============================================================================
 def extract_chr_ram_from_prg(prg: bytearray) -> tuple[bytearray, str]:
     n = len(prg)
@@ -262,7 +224,7 @@ def extract_chr_ram_from_prg(prg: bytearray) -> tuple[bytearray, str]:
     if len(rle_chunks) >= 4096:
         pad = (8192 - (len(rle_chunks) % 8192)) % 8192
         rle_chunks.extend(b"\x00" * pad)
-        return rle_chunks, f"CHR-RAM Descomprimido (Konami RLE + PRG: {len(rle_chunks)//8192} bancos de 8KB)"
+        return rle_chunks, f"CHR-RAM Descomprimido (Konami RLE: {len(rle_chunks)//8192} bancos de 8KB)"
 
     extracted = bytearray()
     for b_ofs in range(0, len(prg), 8192):
@@ -273,7 +235,7 @@ def extract_chr_ram_from_prg(prg: bytearray) -> tuple[bytearray, str]:
 
 
 # =============================================================================
-# ESCÁNER UNIVERSAL DE TEXTOS (SOPORTA PPU PRINT, ASCII Y TABLAS DESPLAZADAS)
+# ESCÁNER ROBUSTO DE TEXTOS (PPU, ASCII Y TABLAS)
 # =============================================================================
 def extract_all_rom_texts(prg: bytearray):
     entries = []
@@ -303,7 +265,7 @@ def extract_all_rom_texts(prg: bytearray):
         })
         used_ranges.append((s, m.end()))
 
-    # 2. Cadenas ASCII estándar en cualquier banco PRG
+    # 2. Cadenas ASCII estándar
     ascii_pat = re.compile(rb"[\x20-\x7E]{5,}")
     for m in ascii_pat.finditer(bytes(prg)):
         s, e = m.start(), m.end()
@@ -344,12 +306,11 @@ def extract_all_rom_texts(prg: bytearray):
             })
         used_ranges.append((s, e))
 
-    # 3. Escáner de Textos Codificados por Tabla (ej. Castlevania, Konami, Nintendo)
-    # Todas las palabras clave tienen al menos 5 letras para garantizar >= 4 diferencias
+    # 3. Escáner de Textos con Diferencias Relativas (Palabras clave de >= 5 caracteres)
     common_words = [
         b"SCORE", b"STAGE", b"PLAYER", b"START", b"GAME ",
         b"OVER ", b"KONAMI", b"CASTLE", b"VAMPIRE", b"PRODUCE",
-        b"DIRECT", b"THANK", b"PLAYING", b"HERO "
+        b"DIRECT", b"THANK", b"PLAYING"
     ]
     prg_arr = np.frombuffer(prg, dtype=np.uint8).astype(np.int16)
     diffs = np.diff(prg_arr)
@@ -358,7 +319,7 @@ def extract_all_rom_texts(prg: bytearray):
     for word in common_words:
         w_diffs = np.diff(np.frombuffer(word, dtype=np.uint8).astype(np.int16))
         k = len(w_diffs)
-        if k < 4 or n_diffs < k:
+        if k < 3 or n_diffs < k:
             continue
 
         cond = np.ones(n_diffs - k + 1, dtype=bool)
@@ -366,7 +327,7 @@ def extract_all_rom_texts(prg: bytearray):
             cond &= (diffs[j:n_diffs - k + 1 + j] == w_diffs[j])
 
         matches = np.where(cond)[0]
-        for pos in matches[:10]:
+        for pos in matches[:8]:
             pos = int(pos)
             if any(us <= pos < ue for us, ue in used_ranges):
                 continue
@@ -399,7 +360,7 @@ def extract_all_rom_texts(prg: bytearray):
 
 
 # =============================================================================
-# ESCÁNER UNIVERSAL DE CANCIONES CHIPTUNE EN ROM (.NES)
+# ESCÁNER ROBUSTO DE CANCIONES CHIPTUNE EN ROM (.NES)
 # =============================================================================
 def extract_all_rom_songs(prg: bytearray):
     songs = {}
@@ -469,7 +430,7 @@ def extract_all_rom_songs(prg: bytearray):
         if 0 <= j_ofs <= len(prg) - 6:
             periods = list(prg[j_ofs:j_ofs + 6])
             if all(0x20 <= p <= 0xF5 for p in periods):
-                songs[f"Jingle Código Secreto / Pausa (${j_addr:04X})"] = {
+                songs[f"Jingle Código Konami / Pausa (${j_addr:04X})"] = {
                     "tempo": 6,
                     "raw_periods": periods,
                     "mel": [8, 11, 13, 16, 18, 20],
@@ -536,422 +497,18 @@ def extract_all_rom_songs(prg: bytearray):
 
 
 # =============================================================================
-# CARGADORES PRINCIPALES DE ARCHIVOS (.NES Y .S)
-# =============================================================================
-def analyze_nes_file(data: bytearray, filename: str):
-    if len(data) < 16 or data[:4] != b"NES\x1a":
-        st.error("❌ El archivo seleccionado no tiene una cabecera iNES válida ('NES\\x1A').")
-        return
-
-    st.session_state.has_nes = True
-    st.session_state.nes_name = filename
-    st.session_state.header = data[:16]
-
-    prg_banks = data[4]
-    chr_banks = data[5]
-    has_trainer = bool(data[6] & 0x04)
-    offset = 16 + (512 if has_trainer else 0)
-    prg_size = prg_banks * 16384
-    chr_size = chr_banks * 8192
-
-    st.session_state.prg_data = bytearray(data[offset:offset + prg_size])
-    prg = st.session_state.prg_data
-
-    if chr_size > 0 and len(data) >= offset + prg_size + chr_size:
-        st.session_state.chr_data = bytearray(data[offset + prg_size:offset + prg_size + chr_size])
-        st.session_state.chr_source_info = f"CHR-ROM Dedicado ({chr_banks} bancos de 8 KB)"
-    else:
-        chr_extracted, info_str = extract_chr_ram_from_prg(prg)
-        st.session_state.chr_data = chr_extracted
-        st.session_state.chr_source_info = info_str
-
-    for i in range(len(prg) - 32):
-        if prg[i] == 0x0F and prg[i + 4] == 0x0F and prg[i + 8] == 0x0F and prg[i + 12] == 0x0F:
-            cand = list(prg[i:i + 32])
-            if all(b <= 0x3F for b in cand) and len(set(cand)) >= 6:
-                st.session_state.palette = cand
-                break
-
-    st.session_state.rom_texts = extract_all_rom_texts(prg)
-    st.session_state.songs = extract_all_rom_songs(prg)
-
-
-def analyze_asm_file(text: str, filename: str):
-    st.session_state.has_asm = True
-    st.session_state.asm_name = filename
-    st.session_state.asm_text = text
-
-    strings = []
-    for m in re.finditer(r'(PRINT\s+\$[0-9A-Fa-f]+,\s*"|[A-Za-z0-9_]+:\s*\.byte\s+"|\.asciiz\s+")([^"]*)(")', text):
-        strings.append({
-            "Identificador": m.group(1).strip().rstrip('"'),
-            "Texto": m.group(2),
-            "Caracteres": len(m.group(2)),
-            "_raw_prefix": m.group(1)
-        })
-    st.session_state.asm_strings = strings
-
-    tables = {}
-    for m in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*):\s*\n?((?:\s*\.byte\s+[^\n]+\n?)+)", text, re.MULTILINE):
-        lbl = m.group(1)
-        body = m.group(2)
-        if '"' in body:
-            continue
-        vals = []
-        for tok in re.findall(r"\$[0-9A-Fa-f]+|\b\d+\b", body):
-            vals.append(int(tok[1:], 16) if tok.startswith("$") else int(tok))
-        if vals:
-            tables[lbl] = vals
-    st.session_state.asm_tables = tables
-
-    if "palette" in tables and len(tables["palette"]) >= 32:
-        st.session_state.palette = tables["palette"][:32]
-    if "note_lo" in tables and "note_hi" in tables:
-        st.session_state.note_lo = tables["note_lo"]
-        st.session_state.note_hi = tables["note_hi"]
-
-    songs = {}
-    if "bgm_mel" in tables:
-        songs["1. Tema Principal (Archivo .s)"] = {
-            "tempo": 6,
-            "song_order": tables.get("song_order", list(range(16))),
-            "mel": tables.get("bgm_mel", [0] * 64),
-            "harm": tables.get("bgm_harm", [0] * 64),
-            "bass": tables.get("bgm_bass", [0] * 64),
-            "drum": tables.get("bgm_drum", [0] * 16),
-            "labels": ("bgm_mel", "bgm_harm", "bgm_bass", "bgm_drum"),
-        }
-    if "susp_mel" in tables:
-        songs["2. Tema de Historia (Archivo .s)"] = {
-            "tempo": 12,
-            "mel": tables.get("susp_mel", [0] * 32),
-            "harm": tables.get("susp_pad", [0] * 32),
-            "bass": tables.get("susp_bass", [0] * 32),
-            "drum": tables.get("susp_drum", [0] * 16),
-            "labels": ("susp_mel", "susp_pad", "susp_bass", "susp_drum"),
-        }
-    if "sel_mel" in tables:
-        songs["3. Tema Selección de Nave (Archivo .s)"] = {
-            "tempo": 7,
-            "mel": tables.get("sel_mel", [0] * 32),
-            "harm": tables.get("sel_pad", [0] * 32),
-            "bass": tables.get("sel_bass", [0] * 32),
-            "drum": tables.get("sel_drum", [0] * 16),
-            "labels": ("sel_mel", "sel_pad", "sel_bass", "sel_drum"),
-        }
-    if "go_notes" in tables:
-        songs["4. Tonada de Game Over (Archivo .s)"] = {
-            "tempo": 10,
-            "mel": tables["go_notes"],
-            "harm": [0] * len(tables["go_notes"]),
-            "bass": list(tables["go_notes"]),
-            "drum": [0] * 8,
-            "labels": ("go_notes", None, None, None),
-        }
-    if "jng_notes" in tables:
-        songs["5. Jingle Código Konami (Archivo .s)"] = {
-            "tempo": 5,
-            "raw_periods": tables["jng_notes"],
-            "mel": [8, 11, 13, 16, 18, 20],
-            "harm": [0] * 6,
-            "bass": [0] * 6,
-            "drum": [0] * 6,
-            "labels": (None, None, None, None),
-        }
-
-    st.session_state.songs = songs
-
-
-# =============================================================================
-# RENDERIZADO ULTRARRÁPIDO VECTORIZADO CON NUMPY
-# =============================================================================
-def get_tile_matrix(bank_idx: int, table_idx: int, tile_id: int):
-    offset = (bank_idx * 8192) + (table_idx * 4096) + (tile_id * 16)
-    chr_d = st.session_state.chr_data
-    if offset + 16 > len(chr_d):
-        return [[0] * 8 for _ in range(8)]
-    raw = np.frombuffer(chr_d[offset:offset + 16], dtype=np.uint8)
-    bp0 = np.unpackbits(raw[:8]).reshape(8, 8)
-    bp1 = np.unpackbits(raw[8:16]).reshape(8, 8)
-    return (bp0 | (bp1 << 1)).tolist()
-
-
-def set_tile_matrix(bank_idx: int, table_idx: int, tile_id: int, mat):
-    offset = (bank_idx * 8192) + (table_idx * 4096) + (tile_id * 16)
-    if offset + 16 > len(st.session_state.chr_data):
-        return
-    arr = np.array(mat, dtype=np.uint8) & 3
-    bp0 = np.packbits(arr & 1, axis=1).flatten()
-    bp1 = np.packbits((arr >> 1) & 1, axis=1).flatten()
-    st.session_state.chr_data[offset:offset + 8] = bytearray(bp0)
-    st.session_state.chr_data[offset + 8:offset + 16] = bytearray(bp1)
-
-
-def render_chr_sheet_fast(bank_idx: int, table_idx: int, pal_group: int, selected_tile: int):
-    offset = (bank_idx * 8192) + (table_idx * 4096)
-    chr_d = st.session_state.chr_data
-    chunk = chr_d[offset:offset + 4096]
-    if len(chunk) < 4096:
-        chunk = chunk + bytearray(4096 - len(chunk))
-
-    raw = np.frombuffer(chunk, dtype=np.uint8).reshape(256, 2, 8)
-    bits = np.unpackbits(raw, axis=2).reshape(256, 2, 8, 8)
-    pixels = bits[:, 0, :, :] | (bits[:, 1, :, :] << 1)
-    grid = pixels.reshape(16, 16, 8, 8).transpose(0, 2, 1, 3).reshape(128, 128)
-
-    sub_pal = np.array([NES_MASTER_PALETTE[st.session_state.palette[pal_group * 4 + c] & 0x3F] for c in range(4)], dtype=np.uint8)
-    rgb_img = sub_pal[grid]
-    img = Image.fromarray(rgb_img, "RGB").resize((384, 384), Image.NEAREST)
-
-    draw = ImageDraw.Draw(img)
-    sx = (selected_tile % 16) * 24
-    sy = (selected_tile // 16) * 24
-    draw.rectangle([sx, sy, sx + 23, sy + 23], outline=(37, 99, 235), width=3)
-    return img
-
-
-def render_metasprite(bank_idx: int, table_idx: int, tl: int, tr: int, bl: int, br: int, mirror_right: bool, pal_group: int):
-    sub_pal = [nes_rgb(st.session_state.palette[pal_group * 4 + c]) for c in range(4)]
-    img = Image.new("RGB", (16, 16), sub_pal[0])
-    px = img.load()
-    quads = [(0, 0, tl, False), (8, 0, tr, mirror_right), (0, 8, bl, False), (8, 8, br, mirror_right)]
-    for qx, qy, t_id, fl in quads:
-        mat = get_tile_matrix(bank_idx, table_idx, t_id)
-        for y in range(8):
-            for x in range(8):
-                sx = (7 - x) if fl else x
-                px[qx + x, qy + y] = sub_pal[mat[y][sx]]
-    return img.resize((160, 160), Image.NEAREST)
-
-
-# =============================================================================
-# SINTETIZADOR 2A03 ULTRARRÁPIDO CON NUMPY
-# =============================================================================
-def synthesize_song_wav_fast(song_dict: dict) -> bytes:
-    sample_rate = 22050
-    step_frames = int(song_dict.get("tempo", 6))
-    samples_per_step = int(sample_rate * (step_frames / 60.0))
-
-    n_lo = st.session_state.note_lo
-    n_hi = st.session_state.note_hi
-
-    if "raw_periods" in song_dict:
-        periods = song_dict["raw_periods"]
-        chunks = []
-        t = np.arange(samples_per_step, dtype=np.float32) / sample_rate
-        for p in periods:
-            freq = 1789773.0 / (16.0 * (p + 1))
-            wave_p1 = np.where((t * freq) % 1.0 < 0.5, 0.35, -0.35)
-            chunks.append(wave_p1)
-        audio = np.concatenate(chunks) if chunks else np.zeros(sample_rate, dtype=np.float32)
-        pcm = np.clip(audio * 30000, -32767, 32767).astype(np.int16).tobytes()
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sample_rate)
-            wf.writeframes(pcm)
-        return buf.getvalue()
-
-    if "song_order" in song_dict and len(song_dict["mel"]) >= 256:
-        mel, harm, bass = [], [], []
-        for pat in song_dict["song_order"]:
-            p_ofs = (pat & 0x0F) * 16
-            mel.extend(song_dict["mel"][p_ofs:p_ofs + 16])
-            harm.extend(song_dict["harm"][p_ofs:p_ofs + 16])
-            bass.extend(song_dict["bass"][p_ofs:p_ofs + 16])
-    else:
-        mel = song_dict["mel"]
-        harm = song_dict["harm"]
-        bass = song_dict["bass"]
-
-    drum = song_dict["drum"]
-
-    def note_freq(n_idx, is_triangle=False):
-        if n_idx <= 0 or n_idx >= len(n_lo):
-            return 0.0
-        period = (n_hi[n_idx] << 8) | n_lo[n_idx]
-        if period <= 0:
-            return 0.0
-        div = 32.0 if is_triangle else 16.0
-        return 1789773.0 / (div * (period + 1))
-
-    t = np.arange(samples_per_step, dtype=np.float32) / sample_rate
-    env = np.maximum(0.30, 1.0 - (np.arange(samples_per_step, dtype=np.float32) / samples_per_step) * 0.60)
-    half_idx = samples_per_step // 2
-    step_env_mel = np.ones(samples_per_step, dtype=np.float32)
-    step_env_mel[half_idx:] = 0.68
-
-    kick_len = min(samples_per_step, int(sample_rate * 0.045))
-    snare_len = min(samples_per_step, int(sample_rate * 0.045))
-    hat_len = min(samples_per_step, int(sample_rate * 0.020))
-    rng = np.random.default_rng(1985)
-    noise_arr = rng.choice([-1.0, 1.0], size=samples_per_step).astype(np.float32)
-
-    chunks = []
-    for s in range(len(mel)):
-        m_note = mel[s]
-        h_note = harm[s] if s < len(harm) else 0
-        b_note = bass[s] if s < len(bass) else 0
-        d_hit = drum[s % len(drum)] if drum else 0
-
-        sig = np.zeros(samples_per_step, dtype=np.float32)
-
-        if m_note > 0:
-            f1 = note_freq(m_note, False)
-            sig += np.where((t * f1) % 1.0 < 0.25, 0.24, -0.24) * step_env_mel
-            if h_note > 0:
-                f2 = note_freq(h_note, False)
-                sig += np.where((t * f2) % 1.0 < 0.50, 0.12, -0.12) * env
-        elif h_note > 0:
-            fh = note_freq(h_note, False)
-            sig += np.where((t * fh) % 1.0 < 0.50, 0.18, -0.18) * env
-
-        if b_note > 0:
-            ft = note_freq(b_note, True)
-            ph = (t * ft) % 1.0
-            tri = np.where(ph < 0.5, 4.0 * ph - 1.0, 3.0 - 4.0 * ph)
-            sig += tri * 0.30
-
-        if d_hit == 1:
-            kt = t[:kick_len]
-            k_env = np.linspace(1.0, 0.0, kick_len, dtype=np.float32)
-            sig[:kick_len] += np.sin(2.0 * np.pi * (115.0 - kt * 1200.0) * kt) * 0.38 * k_env
-        elif d_hit == 2:
-            s_env = np.linspace(1.0, 0.0, snare_len, dtype=np.float32)
-            sig[:snare_len] += noise_arr[:snare_len] * 0.24 * s_env
-        elif d_hit == 3:
-            h_env = np.linspace(1.0, 0.0, hat_len, dtype=np.float32)
-            sig[:hat_len] += noise_arr[:hat_len] * 0.14 * h_env
-
-        chunks.append(sig)
-
-    full_audio = np.concatenate(chunks) if chunks else np.zeros(sample_rate, dtype=np.float32)
-    pcm = np.clip(full_audio * 30000.0, -32767, 32767).astype(np.int16).tobytes()
-
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm)
-    return buf.getvalue()
-
-
-def disassemble_6502(prg_bytes: bytes, bank_idx: int, start_offset: int, num_lines: int = 40):
-    bank_size = 16384
-    base_rom = bank_idx * bank_size
-    num_b = max(1, len(prg_bytes) // 16384)
-    cpu_base = 0xC000 if (num_b == 1 or bank_idx == num_b - 1) else 0x8000
-    pc = start_offset
-    lines = []
-
-    for _ in range(num_lines):
-        rom_pos = base_rom + pc
-        if rom_pos >= len(prg_bytes) or pc >= bank_size:
-            break
-        op = prg_bytes[rom_pos]
-        cpu_addr = cpu_base + pc
-        mnem, mode, size = OPCODES_6502.get(op, (".BYTE", "raw", 1))
-        raw_chunk = prg_bytes[rom_pos:min(len(prg_bytes), rom_pos + size)]
-        hex_str = " ".join(f"{b:02X}" for b in raw_chunk)
-
-        if mode == "raw" or len(raw_chunk) < size:
-            operand, size = f"${op:02X}", 1
-        elif mode == "imp":
-            operand = ""
-        elif mode == "acc":
-            operand = "A"
-        elif mode == "imm":
-            operand = f"#${raw_chunk[1]:02X}"
-        elif mode == "zp":
-            operand = f"${raw_chunk[1]:02X}"
-        elif mode == "zpx":
-            operand = f"${raw_chunk[1]:02X},X"
-        elif mode == "zpy":
-            operand = f"${raw_chunk[1]:02X},Y"
-        elif mode == "indx":
-            operand = f"(${raw_chunk[1]:02X},X)"
-        elif mode == "indy":
-            operand = f"(${raw_chunk[1]:02X}),Y"
-        elif mode == "abs":
-            operand = f"${raw_chunk[1] | (raw_chunk[2] << 8):04X}"
-        elif mode == "absx":
-            operand = f"${raw_chunk[1] | (raw_chunk[2] << 8):04X},X"
-        elif mode == "absy":
-            operand = f"${raw_chunk[1] | (raw_chunk[2] << 8):04X},Y"
-        elif mode == "ind":
-            operand = f"(${raw_chunk[1] | (raw_chunk[2] << 8):04X})"
-        elif mode == "rel":
-            signed_ofs = raw_chunk[1] - 256 if raw_chunk[1] >= 128 else raw_chunk[1]
-            operand = f"${(cpu_addr + 2 + signed_ofs) & 0xFFFF:04X}"
-        else:
-            operand = ""
-
-        lines.append(f"${cpu_addr:04X}   {hex_str:<8s}   {mnem:<4s} {operand}")
-        pc += size
-    return "\n".join(lines)
-
-
-def build_updated_nes() -> bytes:
-    hdr = bytearray(st.session_state.header)
-    prg = st.session_state.prg_data
-    chr_d = st.session_state.chr_data
-    if len(hdr) >= 6 and hdr[5] > 0:
-        return bytes(hdr + prg + chr_d)
-    return bytes(hdr + prg)
-
-
-def build_updated_asm() -> bytes:
-    text = st.session_state.asm_text
-    for item in st.session_state.asm_strings:
-        pref_esc = re.escape(item["_raw_prefix"])
-        new_txt = item["Texto"]
-        text = re.sub(rf'({pref_esc})[^"]*(")', rf'\g<1>{new_txt}\g<2>', text, count=1)
-
-    st.session_state.asm_tables["palette"] = st.session_state.palette
-    for s_data in st.session_state.songs.values():
-        lbls = s_data.get("labels")
-        if lbls:
-            if lbls[0]:
-                st.session_state.asm_tables[lbls[0]] = s_data["mel"]
-            if lbls[1]:
-                st.session_state.asm_tables[lbls[1]] = s_data["harm"]
-            if lbls[2]:
-                st.session_state.asm_tables[lbls[2]] = s_data["bass"]
-            if lbls[3]:
-                st.session_state.asm_tables[lbls[3]] = s_data["drum"]
-
-    for lbl, vals in st.session_state.asm_tables.items():
-        lines = []
-        for i in range(0, len(vals), 16):
-            chunk = ", ".join(f"${v:02X}" if lbl == "palette" else str(v) for v in vals[i:i + 16])
-            lines.append(f"  .byte {chunk}")
-        new_block = "\n".join(lines) + "\n"
-        text = re.sub(
-            rf"^({re.escape(lbl)}:\s*\n?)((?:\s*\.byte\s+[^\n]+\n?)+)",
-            rf"\g<1>{new_block}",
-            text,
-            count=1,
-            flags=re.MULTILINE,
-        )
-    st.session_state.asm_text = text
-    return text.encode("utf-8")
-
-
-# =============================================================================
-# INTERFAZ PRINCIPAL DE USUARIO
+# INICIALIZACIÓN
 # =============================================================================
 init_state()
 
-st.title("🕹️ NES Shooter Studio")
-st.markdown("Suite visual universal para analizar, escuchar y modificar cualquier ROM de Nintendo NES (`*.nes`) y código fuente 6502 (`*.s` / `*.asm`).")
-
+# -----------------------------------------------------------------------------
+# PANTALLA INICIAL LIMPIA
+# -----------------------------------------------------------------------------
 if not st.session_state.has_nes and not st.session_state.has_asm:
     st.markdown("""
     <div class="studio-card">
-        <h3>📂 Sube un archivo para iniciar el análisis</h3>
-        <p>Selecciona cualquier archivo <b>.nes</b> (ej. <i>shooterv1.13.nes</i>, <i>shooter.nes</i>, <i>Castlevania.nes</i> o cualquier ROM comercial/homebrew) o un archivo <b>.s / .asm</b>. El analizador detectará sus canciones, textos, gráficos (incluyendo CHR-RAM comprimido) y código 6502 en milisegundos.</p>
+        <h3>📂 Sube un archivo para comenzar</h3>
+        <p>Selecciona un archivo <b>.nes</b> (ROM compilada) o un archivo <b>.s / .asm</b> (código fuente 6502). El sistema analizará automáticamente sus gráficos, canciones chiptune, textos de pantalla y código máquina.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -968,6 +525,9 @@ if not st.session_state.has_nes and not st.session_state.has_asm:
             st.rerun()
     st.stop()
 
+# -----------------------------------------------------------------------------
+# BARRA LATERAL
+# -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("📂 Archivos Activos")
     if st.session_state.has_nes:
@@ -1014,6 +574,9 @@ with st.sidebar:
             del st.session_state[k]
         st.rerun()
 
+# -----------------------------------------------------------------------------
+# PESTAÑAS PRINCIPALES
+# -----------------------------------------------------------------------------
 tab_mus, tab_txt, tab_spr, tab_ins = st.tabs([
     f"🎵 1. Canciones Chiptune ({len(st.session_state.songs)})",
     f"📝 2. Editor de Textos ({len(st.session_state.rom_texts) + len(st.session_state.asm_strings)})",
@@ -1022,7 +585,7 @@ tab_mus, tab_txt, tab_spr, tab_ins = st.tabs([
 ])
 
 # =============================================================================
-# PESTAÑA 1: CANCIONES CHIPTUNE DETECTADAS Y REPRODUCTOR FIEL AL MOTOR 6502
+# PESTAÑA 1: CANCIONES CHIPTUNE DETECTADAS
 # =============================================================================
 with tab_mus:
     st.subheader("🎵 Canciones y Secuencias Musicales Detectadas")
@@ -1053,6 +616,19 @@ with tab_mus:
                 mime="audio/wav",
                 use_container_width=True,
             )
+
+            if "song_order" in s_data:
+                st.markdown("**Orden de los compases de la canción (`song_order`):**")
+                ord_txt = st.text_input("Secuencia de compases (0 a 15):", ", ".join(str(x) for x in s_data["song_order"]))
+                try:
+                    new_ord = [int(x.strip()) for x in ord_txt.split(",") if x.strip() != ""]
+                    if len(new_ord) == len(s_data["song_order"]):
+                        s_data["song_order"] = new_ord
+                        if "offsets" in s_data and "order" in s_data["offsets"] and st.session_state.has_nes:
+                            o_pos = s_data["offsets"]["order"]
+                            st.session_state.prg_data[o_pos:o_pos + len(new_ord)] = bytearray(new_ord)
+                except ValueError:
+                    pass
 
         with col_m2:
             st.markdown(f"**🎹 Secuenciador de Notas: `{chosen_song}`**")
@@ -1234,6 +810,7 @@ with tab_ins:
         st.subheader(f"🔍 Arquitectura de `{st.session_state.nes_name}`")
         hdr = st.session_state.header
         prg = st.session_state.prg_data
+        chr_d = st.session_state.chr_data
 
         prg_b, chr_b, f6, f7 = hdr[4], hdr[5], hdr[6], hdr[7]
         mapper = (f7 & 0xF0) | (f6 >> 4)
